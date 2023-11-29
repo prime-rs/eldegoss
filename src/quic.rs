@@ -16,17 +16,18 @@ use serde::{Deserialize, Serialize};
 
 use common_x::cert::{read_ca, read_certs, read_key};
 
-pub type NetworkSendStream = SendStream;
-pub type NetworkRecvStream = RecvStream;
+pub type MsgSendStream = SendStream;
+pub type MsgRecvStream = RecvStream;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NetworkMsg {
-    pub topic: String,
-    pub origin: Option<u64>,
+    pub origin: u64,
+    pub to: String,
+    pub msg: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum NetworkConfig {
+pub enum Config {
     Client {
         ca_path: PathBuf,
         connect: String,
@@ -43,7 +44,7 @@ pub enum NetworkConfig {
     },
 }
 
-impl Default for NetworkConfig {
+impl Default for Config {
     fn default() -> Self {
         Self::Client {
             ca_path: Default::default(),
@@ -56,18 +57,18 @@ impl Default for NetworkConfig {
 }
 
 #[derive(Debug, Clone)]
-pub struct Network {
-    pub config: NetworkConfig,
+pub struct Server {
+    pub config: Config,
     pub tx: flume::Sender<NetworkMsg>,
     pub rx: flume::Receiver<NetworkMsg>,
     pub peers: Arc<RwLock<HashMap<u64, Peer>>>,
 }
 
-impl Network {
+impl Server {
     pub async fn serve(self) -> Result<()> {
         let config = &self.config;
         match config {
-            NetworkConfig::Client {
+            Config::Client {
                 ca_path,
                 connect,
                 server_name,
@@ -83,7 +84,7 @@ impl Network {
                 )
                 .await
             }
-            NetworkConfig::Server {
+            Config::Server {
                 cert_path,
                 key_path,
                 port,
@@ -194,24 +195,21 @@ impl Network {
     async fn handle_out_msg(&self) -> Result<()> {
         if let Ok(msg) = self.rx.recv_async().await {
             debug!("send msg: {:?}", msg);
-            match msg.origin {
-                Some(origin) => {
-                    let connection = if let Some(peer) = self.peers.read().get(&origin) {
-                        peer.connection.clone()
-                    } else {
-                        return Ok(());
-                    };
-                    send_msg(&connection, msg).await?;
+            if msg.origin == 0 {
+                let peers: Vec<Peer> = {
+                    let peers_lock = self.peers.read();
+                    peers_lock.values().cloned().collect()
+                };
+                for peer in peers {
+                    send_msg(&peer.connection, msg.clone()).await?;
                 }
-                None => {
-                    let peers: Vec<Peer> = {
-                        let peers_lock = self.peers.read();
-                        peers_lock.values().cloned().collect()
-                    };
-                    for peer in peers {
-                        send_msg(&peer.connection, msg.clone()).await?;
-                    }
-                }
+            } else {
+                let connection = if let Some(peer) = self.peers.read().get(&msg.origin) {
+                    peer.connection.clone()
+                } else {
+                    return Ok(());
+                };
+                send_msg(&connection, msg).await?;
             }
         }
         Ok(())
@@ -284,7 +282,7 @@ async fn handle_stream(
 ) -> Result<()> {
     let req = recv.read_to_end(1024 * 1024 * 16).await?;
     let mut msg = bincode::deserialize::<NetworkMsg>(&req)?;
-    msg.origin = Some(peer_id);
+    msg.origin = peer_id;
     tx.send_async(msg).await?;
     Ok(())
 }
@@ -293,14 +291,14 @@ async fn handle_stream(
 async fn test_server() {
     common_x::log::init_log_filter("debug");
 
-    let config: NetworkConfig = NetworkConfig::Server {
+    let config: Config = Config::Server {
         port: 4721,
         cert_path: "../config/server_cert.pem".into(),
         key_path: "../config/server_key.pem".into(),
         keep_alive_interval: 5,
         check_peer_interval: 2,
     };
-    let network = Network {
+    let network = Server {
         config,
         tx: flume::unbounded().0,
         rx: flume::unbounded().1,
@@ -315,14 +313,14 @@ async fn test_server() {
 async fn test_client() {
     common_x::log::init_log_filter("debug");
 
-    let config: NetworkConfig = NetworkConfig::Client {
+    let config: Config = Config::Client {
         ca_path: "../config/ca_cert.pem".into(),
         connect: "127.0.0.1:4721".to_string(),
         server_name: "test-host".to_string(),
         keep_alive_interval: 5,
         check_peer_interval: 2,
     };
-    let network = Network {
+    let network = Server {
         config,
         tx: flume::unbounded().0,
         rx: flume::unbounded().1,

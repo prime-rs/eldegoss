@@ -7,3 +7,5 @@ Cargo.lock
 *.pem
 .vscode
 .idea
+
+/proto
