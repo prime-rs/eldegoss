@@ -14,7 +14,10 @@ keywords = ["network", "p2p", "gossip", "SWIM"]
 default = []
 
 [dependencies]
-async-std = { version = "1.12", default-features = false, features = ["unstable", "attributes"] }
+async-std = { version = "1.12", default-features = false, features = [
+    "unstable",
+    "attributes",
+] }
 bincode = "1.3"
 color-eyre = "0.6"
 common_x = { version = "0.1", features = ["cert", "log"] }
