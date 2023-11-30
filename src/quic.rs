@@ -5,54 +5,19 @@ use parking_lot::RwLock;
 use quinn::{
     ClientConfig, Connection, Endpoint, RecvStream, SendStream, ServerConfig, TransportConfig,
 };
-use serde::{Deserialize, Serialize};
 
 use common_x::cert::{read_ca, read_certs, read_key, WebPkiVerifierAnyServerName};
 use tokio::{select, task::JoinHandle};
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct NetworkMsg {
-    pub origin: u64,
-    pub to: u64,
-    pub msg: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-#[serde(deny_unknown_fields)]
-pub struct Config {
-    listen: String,
-    connect: Vec<String>,
-
-    ca_path: String,
-    cert_path: String,
-    private_key_path: String,
-
-    keep_alive_interval: u64,
-    check_peer_interval: u64,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            ca_path: Default::default(),
-            connect: Default::default(),
-            listen: Default::default(),
-            cert_path: Default::default(),
-            private_key_path: Default::default(),
-            keep_alive_interval: 5,
-            check_peer_interval: 2,
-        }
-    }
-}
+use crate::{Config, Message};
 
 type Membership = HashMap<u64, (Peer, JoinHandle<()>)>;
 
 #[derive(Debug, Clone)]
 pub struct Server {
     pub config: Config,
-    pub tx: flume::Sender<NetworkMsg>,
-    pub rx: flume::Receiver<NetworkMsg>,
+    pub tx: flume::Sender<Message>,
+    pub rx: flume::Receiver<Message>,
     pub membership: Arc<RwLock<Membership>>,
 }
 
@@ -160,7 +125,7 @@ impl Server {
         info!("new peer({}): {remote_address}", peer.id);
     }
 
-    async fn handle_out_msg(&self, msg: NetworkMsg) -> Result<()> {
+    async fn handle_out_msg(&self, msg: Message) -> Result<()> {
         debug!("send msg: {:?}", msg);
         if msg.to == 0 {
             let peers: Vec<Peer> = {
@@ -205,8 +170,8 @@ impl Server {
 pub struct Peer {
     pub id: u64,
     pub connection: Connection,
-    pub tx: flume::Sender<NetworkMsg>,
-    pub rx: flume::Receiver<NetworkMsg>,
+    pub tx: flume::Sender<Message>,
+    pub rx: flume::Receiver<Message>,
 }
 
 impl Peer {
@@ -214,7 +179,7 @@ impl Peer {
         while let Ok(stream) = self.connection.accept_bi().await {
             tokio::spawn(write_msg(
                 stream.0,
-                NetworkMsg {
+                Message {
                     origin: self.id,
                     to: 0,
                     msg: Some(1),
@@ -237,13 +202,13 @@ impl Peer {
     }
 }
 
-pub async fn write_msg(mut send: SendStream, msg: NetworkMsg) -> Result<()> {
+pub async fn write_msg(mut send: SendStream, msg: Message) -> Result<()> {
     send.write_all(&bincode::serialize(&msg)?).await?;
     send.finish().await?;
     Ok(())
 }
 
-pub async fn send_msg(connection: &Connection, msg: NetworkMsg) -> Result<()> {
+pub async fn send_msg(connection: &Connection, msg: Message) -> Result<()> {
     let mut send = connection.open_uni().await?;
     send.write_all(&bincode::serialize(&msg)?).await?;
     send.finish().await?;
@@ -253,10 +218,10 @@ pub async fn send_msg(connection: &Connection, msg: NetworkMsg) -> Result<()> {
 async fn handle_stream(
     peer_id: u64,
     mut recv: RecvStream,
-    tx: flume::Sender<NetworkMsg>,
+    tx: flume::Sender<Message>,
 ) -> Result<()> {
     let req = recv.read_to_end(1024 * 1024 * 16).await?;
-    let mut msg = bincode::deserialize::<NetworkMsg>(&req)?;
+    let mut msg = bincode::deserialize::<Message>(&req)?;
     debug!("recv msg: {:?}", msg);
     msg.origin = peer_id;
     tx.send_async(msg).await?;
@@ -264,7 +229,7 @@ async fn handle_stream(
 }
 
 #[tokio::test]
-async fn test_server() {
+async fn peer0() {
     common_x::log::init_log_filter("debug");
 
     let config: Config = Config {
@@ -286,7 +251,7 @@ async fn test_server() {
 }
 
 #[tokio::test]
-async fn test_client() {
+async fn peer1() {
     common_x::log::init_log_filter("debug");
 
     let config: Config = Config {
@@ -317,7 +282,7 @@ async fn test_client() {
         select! {
             _ = interval.tick() => {
                 // send msg
-                let msg = NetworkMsg {
+                let msg = Message {
                     origin: 0,
                     to: 0,
                     msg: Some(1),
@@ -343,68 +308,4 @@ async fn test_client() {
             }
         }
     }
-}
-
-#[tokio::test]
-async fn cert() {
-    use common_x::{
-        cert::{ca_cert, create_csr, restore_ca_cert, sign_csr},
-        file::{create_file, read_file_to_string},
-    };
-    // ca
-    let (_, ca_cert_pem, ca_key_pem) = ca_cert();
-    create_file("./config/cert/ca_cert.pem", ca_cert_pem.as_bytes())
-        .await
-        .unwrap();
-    create_file("./config/cert/ca_key.pem", ca_key_pem.as_bytes())
-        .await
-        .unwrap();
-
-    // server csr
-    let (csr_pem, key_pem) = create_csr("test-host");
-    create_file("./config/cert/server_csr.pem", csr_pem.as_bytes())
-        .await
-        .unwrap();
-    create_file("./config/cert/server_key.pem", key_pem.as_bytes())
-        .await
-        .unwrap();
-    // server sign
-    let ca_cert_pem = read_file_to_string("./config/cert/ca_cert.pem")
-        .await
-        .unwrap();
-    let ca_key_pem = read_file_to_string("./config/cert/ca_key.pem")
-        .await
-        .unwrap();
-    let ca = restore_ca_cert(&ca_cert_pem, &ca_key_pem);
-    let csr_pem = read_file_to_string("./config/cert/server_csr.pem")
-        .await
-        .unwrap();
-    let cert_pem = sign_csr(&csr_pem, &ca);
-    create_file("./config/cert/server_cert.pem", cert_pem.as_bytes())
-        .await
-        .unwrap();
-
-    // client csr
-    let (csr_pem, key_pem) = create_csr("client.test-host");
-    create_file("./config/cert/client_csr.pem", csr_pem.as_bytes())
-        .await
-        .unwrap();
-    create_file("./config/cert/client_key.pem", key_pem.as_bytes())
-        .await
-        .unwrap();
-    // client sign
-    let ca_cert_pem = read_file_to_string("./config/cert/ca_cert.pem")
-        .await
-        .unwrap();
-    let ca_key_pem = read_file_to_string("./config/cert/ca_key.pem")
-        .await
-        .unwrap();
-    let ca = restore_ca_cert(&ca_cert_pem, &ca_key_pem);
-    let csr_pem = read_file_to_string("./config/cert/client_csr.pem")
-        .await
-        .unwrap();
-    let cert_pem = sign_csr(&csr_pem, &ca);
-    create_file("./config/cert/client_cert.pem", cert_pem.as_bytes())
-        .await
-        .unwrap();
 }
