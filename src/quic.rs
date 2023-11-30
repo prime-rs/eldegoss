@@ -1,10 +1,4 @@
-use std::{
-    collections::HashMap,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use color_eyre::Result;
 use parking_lot::RwLock;
@@ -13,7 +7,7 @@ use quinn::{
 };
 use serde::{Deserialize, Serialize};
 
-use common_x::cert::{read_ca, read_certs, read_key};
+use common_x::cert::{read_ca, read_certs, read_key, WebPkiVerifierAnyServerName};
 use tokio::{select, task::JoinHandle};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -24,29 +18,28 @@ pub struct NetworkMsg {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Config {
-    Client {
-        ca_path: PathBuf,
-        connect: String,
-        server_name: String,
-        keep_alive_interval: u64,
-        check_peer_interval: u64,
-    },
-    Server {
-        port: u16,
-        cert_path: PathBuf,
-        key_path: PathBuf,
-        keep_alive_interval: u64,
-        check_peer_interval: u64,
-    },
+#[serde(default)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    listen: String,
+    connect: Vec<String>,
+
+    ca_path: String,
+    cert_path: String,
+    private_key_path: String,
+
+    keep_alive_interval: u64,
+    check_peer_interval: u64,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self::Client {
+        Self {
             ca_path: Default::default(),
             connect: Default::default(),
-            server_name: Default::default(),
+            listen: Default::default(),
+            cert_path: Default::default(),
+            private_key_path: Default::default(),
             keep_alive_interval: 5,
             check_peer_interval: 2,
         }
@@ -65,87 +58,58 @@ pub struct Server {
 
 impl Server {
     pub async fn serve(self) -> Result<()> {
-        let config = &self.config;
-        match config {
-            Config::Client {
-                ca_path,
-                connect,
-                server_name,
-                keep_alive_interval,
-                check_peer_interval,
-            } => {
-                self.run_client(
-                    ca_path,
-                    keep_alive_interval,
-                    connect,
-                    server_name,
-                    check_peer_interval,
-                )
-                .await
-            }
-            Config::Server {
-                cert_path,
-                key_path,
-                port,
-                keep_alive_interval,
-                check_peer_interval,
-            } => {
-                self.run_server(
-                    cert_path,
-                    key_path,
-                    port,
-                    keep_alive_interval,
-                    check_peer_interval,
-                )
-                .await
-            }
-        }
+        self.connect().await?;
+        self.run_server().await
     }
 
-    async fn run_client(
-        &self,
-        ca_path: &PathBuf,
-        keep_alive_interval: &u64,
-        connect: &str,
-        server_name: &str,
-        check_peer_interval: &u64,
-    ) -> Result<()> {
-        let mut endpoint = Endpoint::client("[::]:0".parse::<std::net::SocketAddr>()?)?;
-        let mut client_config = ClientConfig::with_root_certificates(read_ca(ca_path)?);
+    async fn connect(&self) -> Result<()> {
+        let Config {
+            ca_path,
+            connect,
+            keep_alive_interval,
+            ..
+        } = &self.config;
+
+        let client_crypto = rustls::ClientConfig::builder()
+            .with_safe_defaults()
+            .with_custom_certificate_verifier(Arc::new(WebPkiVerifierAnyServerName::new(read_ca(
+                &ca_path.into(),
+            )?)))
+            .with_no_client_auth();
+
+        let mut client_config = ClientConfig::new(Arc::new(client_crypto));
         let mut transport_config = TransportConfig::default();
         transport_config.keep_alive_interval(Some(Duration::from_secs(*keep_alive_interval)));
         client_config.transport_config(Arc::new(transport_config));
-        endpoint.set_default_client_config(client_config);
-        let connection = endpoint
-            .connect(connect.parse::<std::net::SocketAddr>()?, server_name)?
-            .await?;
-        self.clone().handle_connection(connection).await;
-        let mut check_peer_interval =
-            tokio::time::interval(Duration::from_secs(*check_peer_interval));
-        loop {
-            select! {
-                Ok(msg) = self.rx.recv_async() => {
-                    self.handle_out_msg(msg).await?;
-                }
-                _ = check_peer_interval.tick() => self.check_membership().await
-            }
+
+        for connect in connect {
+            let mut endpoint = Endpoint::client("[::]:0".parse::<std::net::SocketAddr>()?)?;
+            endpoint.set_default_client_config(client_config.clone());
+            let connection = endpoint
+                .connect(connect.parse::<std::net::SocketAddr>()?, "localhost")?
+                .await?;
+            self.clone().handle_connection(connection).await;
         }
+        Ok(())
     }
 
-    async fn run_server(
-        &self,
-        cert_path: &PathBuf,
-        key_path: &PathBuf,
-        port: &u16,
-        keep_alive_interval: &u64,
-        check_peer_interval: &u64,
-    ) -> Result<()> {
-        let mut server_config =
-            ServerConfig::with_single_cert(read_certs(cert_path)?, read_key(key_path)?)?;
+    async fn run_server(&self) -> Result<()> {
+        let Config {
+            keep_alive_interval,
+            cert_path,
+            listen,
+            private_key_path,
+            check_peer_interval,
+            ..
+        } = &self.config;
+        let mut server_config = ServerConfig::with_single_cert(
+            read_certs(&cert_path.into())?,
+            read_key(&private_key_path.into())?,
+        )?;
         let mut transport_config = TransportConfig::default();
         transport_config.keep_alive_interval(Some(Duration::from_secs(*keep_alive_interval)));
         server_config.transport_config(Arc::new(transport_config));
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), *port);
+        let addr = listen.parse::<SocketAddr>()?;
         let endpoint = Endpoint::server(server_config, addr)?;
         info!("listening on {}", endpoint.local_addr()?);
         let mut check_peer_interval =
@@ -303,12 +267,12 @@ async fn handle_stream(
 async fn test_server() {
     common_x::log::init_log_filter("debug");
 
-    let config: Config = Config::Server {
-        port: 4721,
+    let config: Config = Config {
+        listen: "[::]:4721".to_string(),
         cert_path: "./config/cert/server_cert.pem".into(),
-        key_path: "./config/cert/server_key.pem".into(),
-        keep_alive_interval: 5,
-        check_peer_interval: 2,
+        private_key_path: "./config/cert/server_key.pem".into(),
+        ca_path: "./config/cert/ca_cert.pem".into(),
+        ..Default::default()
     };
     let server = Server {
         config,
@@ -325,12 +289,13 @@ async fn test_server() {
 async fn test_client() {
     common_x::log::init_log_filter("debug");
 
-    let config: Config = Config::Client {
+    let config: Config = Config {
+        connect: ["127.0.0.1:4721".to_string()].to_vec(),
+        listen: "[::]:4722".to_string(),
+        cert_path: "./config/cert/client_cert.pem".into(),
+        private_key_path: "./config/cert/client_key.pem".into(),
         ca_path: "./config/cert/ca_cert.pem".into(),
-        connect: "127.0.0.1:4721".to_string(),
-        server_name: "test-host".to_string(),
-        keep_alive_interval: 5,
-        check_peer_interval: 2,
+        ..Default::default()
     };
     let (tx, rx) = flume::unbounded();
     let network = Server {
