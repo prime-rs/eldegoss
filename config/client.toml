@@ -1,0 +1,14 @@
+db_path = "tmp/client.db"
+data_root_dir = "tmp/client"
+
+[log_config]
+max_level = "info"
+filter = "info"
+# rolling_file_path = "./logs"
+
+[network_config.Client]
+ca_path = "config/cert/ca_cert.pem"
+connect = "127.0.0.1:4721"
+server_name = "test-host"
+keep_alive_interval = 5
+check_peer_interval = 2

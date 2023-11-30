@@ -1,0 +1,14 @@
+db_path = "tmp/server.db"
+data_root_dir = "tmp/server"
+
+[log_config]
+max_level = "info"
+filter = "info"
+# rolling_file_path = "./logs"
+
+[network_config.Server]
+port =  4721
+cert_path =  "config/cert/server_cert.pem"
+key_path = "config/cert/server_key.pem"
+keep_alive_interval = 5
+check_peer_interval = 2
