@@ -1,3 +1,8 @@
+use std::collections::{HashMap, HashSet};
+use std::fmt::{Display, Formatter};
+use std::hash::Hash;
+
+use quic::config;
 use serde::{Deserialize, Serialize};
 
 #[macro_use]
@@ -8,10 +13,49 @@ pub mod quic;
 pub type QuicSendStream = quinn::SendStream;
 pub type QuicRecvStream = quinn::RecvStream;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[repr(transparent)]
+pub struct EldegossId(uhlc::ID);
+
+impl EldegossId {
+    pub fn rand() -> Self {
+        Self(uhlc::ID::rand())
+    }
+    pub fn to_u128(&self) -> u128 {
+        u128::from_le_bytes(self.0.to_le_bytes())
+    }
+}
+
+impl Default for EldegossId {
+    fn default() -> Self {
+        Self::rand()
+    }
+}
+
+impl Display for EldegossId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "EldegossId({:x})", self.to_u128())
+    }
+}
+
+impl From<uhlc::ID> for EldegossId {
+    fn from(id: uhlc::ID) -> Self {
+        Self(id)
+    }
+}
+
+impl From<u128> for EldegossId {
+    fn from(id: u128) -> Self {
+        uhlc::ID::try_from(id).unwrap().into()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    id: u128,
+
     listen: String,
     connect: Vec<String>,
 
@@ -20,28 +64,171 @@ pub struct Config {
     private_key_path: String,
 
     keep_alive_interval: u64,
-    check_peer_interval: u64,
+    check_neighbor_interval: u64,
+    msg_timeout: u64,
+    msg_max_size: usize,
+
+    self_recv: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
+            id: Default::default(),
             ca_path: Default::default(),
             connect: Default::default(),
             listen: Default::default(),
             cert_path: Default::default(),
             private_key_path: Default::default(),
             keep_alive_interval: 5,
-            check_peer_interval: 2,
+            check_neighbor_interval: 3,
+            msg_timeout: 2,
+            msg_max_size: 1024 * 1024 * 16,
+            self_recv: false,
         }
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Member {
+    pub id: EldegossId,
+    pub subscription_list: HashSet<String>,
+    pub neighbor_list: HashSet<EldegossId>,
+}
+
+impl Hash for Member {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
+impl Member {
+    pub fn new(id: EldegossId) -> Self {
+        Self {
+            id,
+            subscription_list: Default::default(),
+            neighbor_list: Default::default(),
+        }
+    }
+    pub fn add_neighbor(&mut self, id: EldegossId) {
+        self.neighbor_list.insert(id);
+    }
+    pub fn remove_neighbor(&mut self, id: EldegossId) {
+        self.neighbor_list.remove(&id);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Membership {
+    subscription_map: HashMap<String, HashSet<EldegossId>>,
+    member_map: HashMap<EldegossId, Member>,
+    check_member_set: HashSet<EldegossId>,
+}
+
+impl Membership {
+    pub fn merge(&mut self, other: &Self) {
+        for (subscription, ids) in &other.subscription_map {
+            if let Some(self_ids) = self.subscription_map.get_mut(subscription) {
+                self_ids.extend(ids);
+            } else {
+                self.subscription_map
+                    .insert(subscription.to_string(), ids.clone());
+            }
+        }
+        for (id, member) in &other.member_map {
+            if let Some(self_member) = self.member_map.get_mut(id) {
+                self_member
+                    .subscription_list
+                    .extend(member.subscription_list.clone());
+                self_member.neighbor_list.extend(&member.neighbor_list);
+            } else {
+                self.member_map.insert(*id, member.clone());
+            }
+        }
+    }
+
+    pub fn add_member(&mut self, member: Member) {
+        for subscription in &member.subscription_list {
+            if let Some(ids) = self.subscription_map.get_mut(subscription) {
+                ids.insert(member.id);
+            } else {
+                let mut ids = HashSet::new();
+                ids.insert(member.id);
+                self.subscription_map.insert(subscription.to_string(), ids);
+            }
+        }
+        for neighbor_id in &member.neighbor_list {
+            if let Some(neighbor) = self.member_map.get_mut(neighbor_id) {
+                neighbor.add_neighbor(member.id);
+            }
+        }
+        self.member_map.insert(member.id, member);
+    }
+
+    pub fn remove_member(&mut self, id: EldegossId) {
+        if let Some(member) = self.member_map.remove(&id) {
+            for subscription in &member.subscription_list {
+                let mut empty = false;
+                if let Some(ids) = self.subscription_map.get_mut(subscription) {
+                    ids.remove(&member.id);
+                    if ids.is_empty() {
+                        empty = true;
+                    }
+                }
+                if empty {
+                    self.subscription_map.remove(subscription);
+                }
+            }
+            for neighbor_id in &member.neighbor_list {
+                if let Some(neighbor) = self.member_map.get_mut(neighbor_id) {
+                    neighbor.remove_neighbor(member.id);
+                }
+            }
+        }
+    }
+
+    pub fn add_check_member(&mut self, id: EldegossId) {
+        if let Some(self_member) = self.member_map.get_mut(&config().id.into()) {
+            self_member.remove_neighbor(id);
+        }
+        self.check_member_set.insert(id);
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub enum MessageBody {
+    #[default]
+    Ok,
+    JoinReq(Vec<String>),
+    JoinRsp(Membership),
+    Membership(Membership),
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Message {
-    pub origin: u64,
-    pub to: u64,
-    pub msg: Option<u64>,
+    pub origin: u128,
+    pub to: u128,
+    pub topic: String,
+    pub body: MessageBody,
+}
+
+impl Message {
+    pub fn to(to: u128, msg: MessageBody) -> Self {
+        Self {
+            origin: 0,
+            to,
+            topic: Default::default(),
+            body: msg,
+        }
+    }
+    pub const fn publish(topic: String, msg: MessageBody) -> Self {
+        Self {
+            origin: 0,
+            to: 0,
+            topic,
+            body: msg,
+        }
+    }
 }
 
 #[tokio::test]

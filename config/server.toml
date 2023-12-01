@@ -1,3 +1,4 @@
+id = 10
 db_path = "tmp/server.db"
 data_root_dir = "tmp/server"
 
