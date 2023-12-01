@@ -40,35 +40,10 @@ pub struct Neighbor {
 impl Neighbor {
     async fn handle(self) {
         select! {
-            // _ = self.read_bi() => {}
             _ = self.read_uni() => {}
             _ = self.read_datagrams() => {}
         }
     }
-
-    // async fn handle_bi(self, mut stream: (SendStream, RecvStream)) -> Result<()> {
-    //     let req = stream.1.read_to_end(config().msg_max_size).await?;
-    //     let mut msg = bincode::deserialize::<Message>(&req)?;
-    //     debug!("recv msg: {:?}", msg);
-    //     msg.origin = self.id.to_u128();
-
-    //     if let MessageBody::CheckReq(check_id) = msg.body {
-    //         let rsp = Message::to(
-    //             self.id.to_u128(),
-    //             MessageBody::CheckRsp(self.server.membership.read().contains(&check_id.into())),
-    //         );
-    //         tokio::spawn(write_msg(stream.0, rsp));
-    //     }
-
-    //     Ok(())
-    // }
-
-    // use for maintain membership
-    // async fn read_bi(&self) {
-    //     while let Ok(stream) = self.connection.accept_bi().await {
-    //         tokio::spawn(self.clone().handle_bi(stream));
-    //     }
-    // }
 
     // use for app msg
     async fn read_uni(&self) {
@@ -176,7 +151,7 @@ impl Server {
         loop {
             select! {
                 Ok(msg) = self.msg_from_app.recv_async() => {
-                    self.dispatch(msg, config().self_recv)?;
+                    self.dispatch(msg, false)?;
                 }
                 Some(connecting) = endpoint.accept() => {
                     debug!("connection incoming");
@@ -306,11 +281,11 @@ impl Server {
         }
     }
 
-    fn dispatch(&self, msg: Message, self_recv: bool) -> Result<()> {
+    fn dispatch(&self, msg: Message, is_received: bool) -> Result<()> {
         debug!("dispatch msg: {:?}", msg);
         match (msg.to, msg.topic.as_str()) {
             (0, "") => {
-                if self_recv {
+                if is_received {
                     match &msg.body {
                         MessageBody::AddMember(member) => {
                             self.membership.write().add_member(member.clone());
@@ -329,6 +304,8 @@ impl Server {
                         _ => {}
                     }
                 }
+
+                // TODO: 提取相同代码方法, gossip 发送控制层
                 let neighbor_ids = self
                     .neighbors
                     .read()
@@ -350,7 +327,7 @@ impl Server {
                 }
             }
             (0, topic) => {
-                if self_recv && self.subscription_list.read().contains(topic) {
+                if is_received && self.subscription_list.read().contains(topic) {
                     let _ = self.msg_to_app.send(msg.clone());
                 }
                 if let Some(subscribers) = self.membership.read().subscription_map.get(topic) {
@@ -364,7 +341,7 @@ impl Server {
             }
             (to, "") => {
                 if to == config().id {
-                    if self_recv {
+                    if is_received {
                         match &msg.body {
                             MessageBody::AddMember(member) => {
                                 self.membership.write().add_member(member.clone());
@@ -423,7 +400,7 @@ impl Server {
             }
             (to, topic) => {
                 if to == config().id {
-                    if self_recv && self.subscription_list.read().contains(topic) {
+                    if is_received && self.subscription_list.read().contains(topic) {
                         let _ = self.msg_to_app.send(msg.clone());
                     }
                 } else if let Some(subscribers) = self.membership.read().subscription_map.get(topic)

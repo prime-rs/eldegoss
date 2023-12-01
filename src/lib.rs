@@ -67,9 +67,8 @@ pub struct Config {
     check_neighbor_interval: u64,
     msg_timeout: u64,
     msg_max_size: usize,
+    // TODO: 解决消息循环问题
     gossip_fanout: usize,
-
-    self_recv: bool,
 }
 
 impl Default for Config {
@@ -85,7 +84,6 @@ impl Default for Config {
             check_neighbor_interval: 3,
             msg_timeout: 2,
             msg_max_size: 1024 * 1024 * 16,
-            self_recv: false,
             gossip_fanout: 2,
         }
     }
