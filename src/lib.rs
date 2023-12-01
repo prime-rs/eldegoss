@@ -67,6 +67,7 @@ pub struct Config {
     check_neighbor_interval: u64,
     msg_timeout: u64,
     msg_max_size: usize,
+    gossip_fanout: usize,
 
     self_recv: bool,
 }
@@ -74,7 +75,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            id: Default::default(),
+            id: rand::random(),
             ca_path: Default::default(),
             connect: Default::default(),
             listen: Default::default(),
@@ -85,6 +86,7 @@ impl Default for Config {
             msg_timeout: 2,
             msg_max_size: 1024 * 1024 * 16,
             self_recv: false,
+            gossip_fanout: 2,
         }
     }
 }
@@ -122,10 +124,14 @@ impl Member {
 pub struct Membership {
     subscription_map: HashMap<String, HashSet<EldegossId>>,
     member_map: HashMap<EldegossId, Member>,
-    check_member_set: HashSet<EldegossId>,
+    check_member_list: Vec<EldegossId>,
+    wait_for_remove_member_list: Vec<EldegossId>,
 }
 
 impl Membership {
+    pub fn contains(&self, id: &EldegossId) -> bool {
+        self.member_map.contains_key(id)
+    }
     pub fn merge(&mut self, other: &Self) {
         for (subscription, ids) in &other.subscription_map {
             if let Some(self_ids) = self.subscription_map.get_mut(subscription) {
@@ -163,6 +169,7 @@ impl Membership {
             }
         }
         self.member_map.insert(member.id, member);
+        debug!("add member: {:?}", self.member_map);
     }
 
     pub fn remove_member(&mut self, id: EldegossId) {
@@ -185,13 +192,23 @@ impl Membership {
                 }
             }
         }
+        debug!("remove member: {:?}", self.member_map);
     }
 
     pub fn add_check_member(&mut self, id: EldegossId) {
         if let Some(self_member) = self.member_map.get_mut(&config().id.into()) {
             self_member.remove_neighbor(id);
         }
-        self.check_member_set.insert(id);
+        self.check_member_list.push(id);
+    }
+
+    pub fn get_check_member(&mut self) -> Option<EldegossId> {
+        if let Some(id) = self.check_member_list.pop() {
+            self.wait_for_remove_member_list.push(id);
+            Some(id)
+        } else {
+            None
+        }
     }
 }
 
@@ -199,9 +216,12 @@ impl Membership {
 pub enum MessageBody {
     #[default]
     Ok,
+    AddMember(Member),
+    RemoveMember(u128),
     JoinReq(Vec<String>),
     JoinRsp(Membership),
-    Membership(Membership),
+    CheckReq(u128),
+    CheckRsp(u128, bool),
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

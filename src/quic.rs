@@ -14,6 +14,7 @@ use quinn::{
 };
 
 use common_x::cert::{read_ca, read_certs, read_key, WebPkiVerifierAnyServerName};
+use rand::Rng;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use tokio::select;
 
@@ -33,47 +34,66 @@ pub fn config() -> &'static Config {
 pub struct Neighbor {
     pub id: EldegossId,
     pub connection: Connection,
-    pub tx: Sender<Message>,
+    pub server: Server,
 }
 
 impl Neighbor {
     async fn handle(self) {
         select! {
-            _ = self.read_bi() => {}
+            // _ = self.read_bi() => {}
             _ = self.read_uni() => {}
             _ = self.read_datagrams() => {}
         }
     }
 
-    async fn read_bi(&self) {
-        while let Ok((tx, rv)) = self.connection.accept_bi().await {
-            tokio::spawn(write_msg(
-                tx,
-                Message::to(self.id.to_u128(), MessageBody::Ok),
-            ));
-            tokio::spawn(handle_stream(self.id, rv, self.tx.clone()));
-        }
-    }
+    // async fn handle_bi(self, mut stream: (SendStream, RecvStream)) -> Result<()> {
+    //     let req = stream.1.read_to_end(config().msg_max_size).await?;
+    //     let mut msg = bincode::deserialize::<Message>(&req)?;
+    //     debug!("recv msg: {:?}", msg);
+    //     msg.origin = self.id.to_u128();
 
+    //     if let MessageBody::CheckReq(check_id) = msg.body {
+    //         let rsp = Message::to(
+    //             self.id.to_u128(),
+    //             MessageBody::CheckRsp(self.server.membership.read().contains(&check_id.into())),
+    //         );
+    //         tokio::spawn(write_msg(stream.0, rsp));
+    //     }
+
+    //     Ok(())
+    // }
+
+    // use for maintain membership
+    // async fn read_bi(&self) {
+    //     while let Ok(stream) = self.connection.accept_bi().await {
+    //         tokio::spawn(self.clone().handle_bi(stream));
+    //     }
+    // }
+
+    // use for app msg
     async fn read_uni(&self) {
         while let Ok(stream) = self.connection.accept_uni().await {
-            tokio::spawn(handle_stream(self.id, stream, self.tx.clone()));
+            tokio::spawn(handle_stream(self.id, stream, self.server.clone()));
         }
     }
 
+    // TODO: use for app msg now, maybe use for other purpose
     async fn read_datagrams(&self) {
         while let Ok(datagram) = self.connection.read_datagram().await {
-            info!("recv dg: {}", String::from_utf8_lossy(&datagram));
+            if let Ok(mut msg) = bincode::deserialize::<Message>(&datagram) {
+                debug!("recv msg: {:?}", msg);
+                msg.origin = self.id.to_u128();
+
+                let _ = self.server.dispatch(msg, true);
+            }
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct Server {
-    pub tx_to_app: Sender<Message>,
-    pub rx_from_app: Receiver<Message>,
-    pub tx_to_neighbor: Sender<Message>,
-    pub rx_from_neighbor: Receiver<Message>,
+    pub msg_to_app: Sender<Message>,
+    pub msg_from_app: Receiver<Message>,
     pub neighbors: Arc<RwLock<HashMap<EldegossId, Neighbor>>>,
     pub membership: Arc<RwLock<Membership>>,
     pub subscription_list: Arc<RwLock<HashSet<String>>>,
@@ -84,36 +104,19 @@ impl Server {
         let member = Member::new(config().id.into());
         let mut membership = Membership::default();
         membership.add_member(member);
-        let (tx_to_neighbor, rx_from_neighbor) = flume::unbounded();
         Self {
-            tx_to_app: tx,
-            rx_from_app: rx,
+            msg_to_app: tx,
+            msg_from_app: rx,
             neighbors: Arc::new(RwLock::new(HashMap::new())),
             membership: Arc::new(RwLock::new(membership)),
             subscription_list: Arc::new(RwLock::new(HashSet::new())),
-            tx_to_neighbor,
-            rx_from_neighbor,
         }
     }
 
     pub async fn serve(self) -> Result<()> {
         self.connect().await?;
         self.run_server().await?;
-        self.swim().await?;
-        while let Ok(msg) = self.rx_from_neighbor.recv_async().await {
-            self.dispatch(msg, true).await?;
-        }
         Ok(())
-    }
-
-    async fn swim(&self) -> Result<()> {
-        let mut interval =
-            tokio::time::interval(Duration::from_secs(config().check_neighbor_interval));
-        loop {
-            interval.tick().await;
-            let msg = Message::to(0, MessageBody::Membership(self.membership.read().clone()));
-            self.tx_to_app.send_async(msg).await?;
-        }
     }
 
     async fn connect(&self) -> Result<()> {
@@ -172,16 +175,14 @@ impl Server {
             tokio::time::interval(Duration::from_secs(*check_neighbor_interval));
         loop {
             select! {
-                Ok(msg) = self.rx_from_app.recv_async() => {
-                    self.dispatch(msg, config().self_recv).await?;
+                Ok(msg) = self.msg_from_app.recv_async() => {
+                    self.dispatch(msg, config().self_recv)?;
                 }
                 Some(connecting) = endpoint.accept() => {
                     debug!("connection incoming");
-                    if let Err(e) = self.clone().handle_join_request(connecting).await {
-                        error!("handle join request failed: {:?}", e);
-                    }
+                    tokio::spawn(self.clone().handle_join_request(connecting));
                 }
-                _ = check_neighbor_interval.tick() => self.check_neighbors().await
+                _ = check_neighbor_interval.tick() => self.maintain_membership().await
             }
         }
     }
@@ -212,7 +213,7 @@ impl Server {
                     let neighbor = Neighbor {
                         id: msg.origin.into(),
                         connection,
-                        tx: self.tx_to_neighbor.clone(),
+                        server: self.clone(),
                     };
 
                     tokio::spawn(neighbor.clone().handle());
@@ -248,6 +249,11 @@ impl Server {
                     Ok((tx, mut rv)) = connection.accept_bi() => {
                         let req = rv.read_to_end(*msg_max_size).await?;
                         let msg = bincode::deserialize::<Message>(&req)?;
+
+                        if self.membership.read().contains(&msg.origin.into()) {
+                            return Err(eyre!("already joined: {}", msg.origin));
+                        }
+
                         if let MessageBody::JoinReq(subscription_list) = msg.body {
                             let mut neighbor_list = HashSet::new();
                             neighbor_list.insert((*id).into());
@@ -256,7 +262,16 @@ impl Server {
                                 subscription_list: HashSet::from_iter(subscription_list),
                                 neighbor_list,
                             };
-                            self.membership.write().add_member(member);
+                            self.membership.write().add_member(member.clone());
+
+                            self.dispatch(
+                                Message::publish(
+                                    "".to_string(),
+                                    MessageBody::AddMember(member),
+                                ),
+                                false,
+                            )?;
+
                             let memberlist = self.membership.read().clone();
                             debug!("memberlist: {:#?}", memberlist);
 
@@ -270,7 +285,7 @@ impl Server {
                             let neighbor = Neighbor {
                                 id: msg.origin.into(),
                                 connection,
-                                tx: self.tx_to_neighbor.clone(),
+                                server: self.clone(),
                             };
 
                             tokio::spawn(neighbor.clone().handle());
@@ -291,15 +306,52 @@ impl Server {
         }
     }
 
-    async fn dispatch(&self, msg: Message, self_recv: bool) -> Result<()> {
+    fn dispatch(&self, msg: Message, self_recv: bool) -> Result<()> {
         debug!("dispatch msg: {:?}", msg);
         match (msg.to, msg.topic.as_str()) {
             (0, "") => {
-                // TODO
+                if self_recv {
+                    match &msg.body {
+                        MessageBody::AddMember(member) => {
+                            self.membership.write().add_member(member.clone());
+                        }
+                        MessageBody::RemoveMember(id) => {
+                            self.membership.write().remove_member((*id).into());
+                        }
+                        MessageBody::CheckRsp(id, result) => {
+                            if *result {
+                                self.membership
+                                    .write()
+                                    .wait_for_remove_member_list
+                                    .retain(|id_| &id_.to_u128() != id);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let neighbor_ids = self
+                    .neighbors
+                    .read()
+                    .iter()
+                    .filter_map(|(id, neighbor)| {
+                        if id.to_u128() != msg.origin {
+                            Some(neighbor)
+                        } else {
+                            None
+                        }
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let mut rng = rand::thread_rng();
+                for _ in 0..config().gossip_fanout {
+                    let index = rng.gen_range(0..neighbor_ids.len());
+                    let connection = neighbor_ids[index].connection.clone();
+                    tokio::spawn(send_uni_msg(connection, msg.clone()));
+                }
             }
             (0, topic) => {
                 if self_recv && self.subscription_list.read().contains(topic) {
-                    let _ = self.tx_to_app.send(msg.clone());
+                    let _ = self.msg_to_app.send(msg.clone());
                 }
                 if let Some(subscribers) = self.membership.read().subscription_map.get(topic) {
                     subscribers.par_iter().for_each(|member_id| {
@@ -313,7 +365,44 @@ impl Server {
             (to, "") => {
                 if to == config().id {
                     if self_recv {
-                        let _ = self.tx_to_app.send(msg.clone());
+                        match &msg.body {
+                            MessageBody::AddMember(member) => {
+                                self.membership.write().add_member(member.clone());
+                            }
+                            MessageBody::RemoveMember(id) => {
+                                self.membership.write().remove_member((*id).into());
+                            }
+                            MessageBody::CheckReq(check_id) => {
+                                let result =
+                                    self.neighbors.read().contains_key(&(*check_id).into());
+                                let neighbor_ids = self
+                                    .neighbors
+                                    .read()
+                                    .iter()
+                                    .filter_map(|(id, neighbor)| {
+                                        if id.to_u128() != msg.origin {
+                                            Some(neighbor)
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .cloned()
+                                    .collect::<Vec<_>>();
+                                let mut rng = rand::thread_rng();
+                                for _ in 0..config().gossip_fanout {
+                                    let index = rng.gen_range(0..neighbor_ids.len());
+                                    let connection = neighbor_ids[index].connection.clone();
+                                    tokio::spawn(send_uni_msg(
+                                        connection,
+                                        Message::publish(
+                                            "".to_string(),
+                                            MessageBody::CheckRsp(*check_id, result),
+                                        ),
+                                    ));
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 } else if let Some(neighbor) = self.neighbors.read().get(&to.into()) {
                     let connection = neighbor.connection.clone();
@@ -335,7 +424,7 @@ impl Server {
             (to, topic) => {
                 if to == config().id {
                     if self_recv && self.subscription_list.read().contains(topic) {
-                        let _ = self.tx_to_app.send(msg.clone());
+                        let _ = self.msg_to_app.send(msg.clone());
                     }
                 } else if let Some(subscribers) = self.membership.read().subscription_map.get(topic)
                 {
@@ -359,8 +448,10 @@ impl Server {
                                 });
                             if empty {
                                 self.neighbors.read().par_iter().for_each(|(_, neighbor)| {
-                                    let connection = neighbor.connection.clone();
-                                    tokio::spawn(send_uni_msg(connection, msg.clone()));
+                                    if neighbor.id.to_u128() != msg.origin {
+                                        let connection = neighbor.connection.clone();
+                                        tokio::spawn(send_uni_msg(connection, msg.clone()));
+                                    }
                                 });
                             }
                         }
@@ -371,18 +462,69 @@ impl Server {
         Ok(())
     }
 
-    async fn check_neighbors(&self) {
-        let mut remove_ids = vec![];
-        self.neighbors.read().values().for_each(|neighbor| {
-            if let Some(reason) = neighbor.connection.close_reason() {
-                info!("neighbor({}) closed: {}", neighbor.id, reason);
-                remove_ids.push(neighbor.id);
+    fn check_member(&self, check_id: EldegossId) -> Result<bool> {
+        if let Some(check_member) = self.membership.read().member_map.get(&check_id) {
+            check_member
+                .neighbor_list
+                .par_iter()
+                .for_each(|neighbor_id| {
+                    let _ = self.dispatch(
+                        Message::to(
+                            neighbor_id.to_u128(),
+                            MessageBody::CheckReq(check_id.to_u128()),
+                        ),
+                        false,
+                    );
+                });
+        }
+        Ok(false)
+    }
+
+    async fn maintain_membership(&self) {
+        {
+            let mut membership = self.membership.write();
+            while let Some(remove_id) = membership.wait_for_remove_member_list.pop() {
+                debug!("remove member: {}", remove_id);
+                membership.remove_member(remove_id);
+                let _ = self.dispatch(
+                    Message::publish(
+                        "".to_string(),
+                        MessageBody::RemoveMember(remove_id.to_u128()),
+                    ),
+                    false,
+                );
             }
-        });
-        for remove_id in remove_ids {
-            self.neighbors.write().remove(&remove_id);
-            self.membership.write().add_check_member(remove_id);
-            // TODO: Notify other nodes to check this member
+        }
+
+        {
+            loop {
+                let check_id = self.membership.write().get_check_member();
+                if let Some(check_id) = check_id {
+                    debug!("check member: {}", check_id);
+                    let _ = self.check_member(check_id);
+                } else {
+                    break;
+                }
+            }
+        }
+
+        let mut remove_ids = vec![];
+        {
+            self.neighbors.read().values().for_each(|neighbor| {
+                if let Some(reason) = neighbor.connection.close_reason() {
+                    info!("neighbor({}) closed: {}", neighbor.id, reason);
+                    remove_ids.push(neighbor.id);
+                }
+            });
+        }
+
+        {
+            let mut neighbors = self.neighbors.write();
+            let mut membership = self.membership.write();
+            for remove_id in remove_ids {
+                neighbors.remove(&remove_id);
+                membership.add_check_member(remove_id);
+            }
         }
     }
 }
@@ -402,14 +544,14 @@ pub async fn read_msg(mut recv: RecvStream) -> Result<Message> {
 async fn handle_stream(
     neighbor_id: EldegossId,
     mut recv: RecvStream,
-    tx: Sender<Message>,
+    server: Server,
 ) -> Result<()> {
     let req = recv.read_to_end(config().msg_max_size).await?;
     let mut msg = bincode::deserialize::<Message>(&req)?;
     debug!("recv msg: {:?}", msg);
     msg.origin = neighbor_id.to_u128();
 
-    tx.send_async(msg).await?;
+    server.dispatch(msg, true)?;
     Ok(())
 }
 
@@ -445,9 +587,8 @@ async fn neighbor1() {
     common_x::log::init_log_filter("debug");
 
     init_config(Config {
-        id: 2,
         connect: ["127.0.0.1:4721".to_string()].to_vec(),
-        listen: "[::]:4723".to_string(),
+        listen: "[::]:0".to_string(),
         cert_path: "./config/cert/client_cert.pem".into(),
         private_key_path: "./config/cert/client_key.pem".into(),
         ca_path: "./config/cert/ca_cert.pem".into(),
@@ -457,7 +598,7 @@ async fn neighbor1() {
     let (tx, rx) = flume::unbounded();
     let server = Server::new(flume::unbounded().0, rx);
 
-    let mut send_test_msg_interval = tokio::time::interval(Duration::from_secs(1));
+    let mut send_test_msg_interval = tokio::time::interval(Duration::from_secs(100));
 
     tokio::spawn(async move {
         loop {
