@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 extern crate tracing as logger;
 
 pub mod quic;
+mod protocol;
 
 pub type QuicSendStream = quinn::SendStream;
 pub type QuicRecvStream = quinn::RecvStream;
@@ -206,46 +207,6 @@ impl Membership {
             Some(id)
         } else {
             None
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub enum MessageBody {
-    #[default]
-    Ok,
-    AddMember(Member),
-    RemoveMember(u128),
-    JoinReq(Vec<String>),
-    JoinRsp(Membership),
-    CheckReq(u128),
-    CheckRsp(u128, bool),
-    Data(Vec<u8>),
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct Message {
-    pub origin: u128,
-    pub to: u128,
-    pub topic: String,
-    pub body: MessageBody,
-}
-
-impl Message {
-    pub fn to(to: u128, msg: MessageBody) -> Self {
-        Self {
-            origin: 0,
-            to,
-            topic: Default::default(),
-            body: msg,
-        }
-    }
-    pub const fn publish(topic: String, msg: MessageBody) -> Self {
-        Self {
-            origin: 0,
-            to: 0,
-            topic,
-            body: msg,
         }
     }
 }

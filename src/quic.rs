@@ -18,7 +18,10 @@ use rand::Rng;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use tokio::select;
 
-use crate::{Config, EldegossId, Member, Membership, Message, MessageBody};
+use crate::{
+    protocol::{decode_msg, encode_msg, EldegossMsg, EldegossMsgBody, Message},
+    Config, EldegossId, Member, Membership,
+};
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
@@ -55,9 +58,9 @@ impl Neighbor {
     // TODO: use for app msg now, maybe use for other purpose
     async fn read_datagrams(&self) {
         while let Ok(datagram) = self.connection.read_datagram().await {
-            if let Ok(mut msg) = bincode::deserialize::<Message>(&datagram) {
+            if let Ok(mut msg) = decode_msg(&datagram) {
                 debug!("recv msg: {:?}", msg);
-                msg.origin = self.id.to_u128();
+                msg.set_from(self.id.to_u128());
 
                 self.server.dispatch(msg, true);
             }
@@ -88,8 +91,8 @@ impl Server {
         let mut membership = Membership::default();
         membership.add_member(member);
         Self {
-            msg_for_recv: flume::bounded(1024 * 1024),
-            msg_for_send: flume::bounded(1024 * 1024),
+            msg_for_recv: flume::bounded(1024 * 1024 * 1024),
+            msg_for_send: flume::bounded(1024 * 1024 * 1024),
             neighbors: Arc::new(RwLock::new(HashMap::new())),
             membership: Arc::new(RwLock::new(membership)),
             subscription_list: Arc::new(RwLock::new(HashSet::new())),
@@ -110,7 +113,7 @@ impl Server {
     }
 
     fn to_send_msg(&self, connection: &Connection, mut msg: Message) {
-        msg.origin = config().id;
+        msg.set_from(config().id);
         if let Err(e) = self.msg_for_send.0.send((connection.clone(), msg)) {
             error!("to_send_msg failed: {:?}", e);
         }
@@ -198,27 +201,35 @@ impl Server {
             }
             Ok((mut tx, mut rv)) = connection.open_bi() => {
                 let subscription_list = self.subscription_list.read().clone();
-                let _ = write_msg(&mut tx, Message::to(0, MessageBody::JoinReq(
-                    subscription_list.into_iter().collect(),
-                ))).await;
+                let _ = write_msg(
+                    &mut tx,
+                    Message::eldegoss(
+                        0,
+                        EldegossMsgBody::JoinReq(subscription_list.into_iter().collect()),
+                    ),
+                )
+                .await;
                 let req = rv.read_to_end(*msg_max_size).await?;
-                let msg = bincode::deserialize::<Message>(&req)?;
-                if let MessageBody::JoinRsp(membership) = msg.body {
+                let msg = decode_msg(&req)?;
+                if let Message::EldegossMsg(EldegossMsg {
+                    origin,
+                    body: EldegossMsgBody::JoinRsp(membership),
+                    ..
+                }) = msg
+                {
                     self.membership.write().merge(&membership);
 
                     debug!("membership: {:#?}", self.membership.read());
 
                     let neighbor = Neighbor {
-                        id: msg.origin.into(),
+                        id: origin.into(),
                         connection,
                         server: self.clone(),
                     };
 
                     tokio::spawn(neighbor.clone().handle());
 
-                    self.neighbors
-                        .write()
-                        .insert(neighbor.id, neighbor.clone());
+                    self.neighbors.write().insert(neighbor.id, neighbor.clone());
 
                     info!("new neighbor({}): {remote_address}", neighbor.id);
                     Ok(())
@@ -246,26 +257,31 @@ impl Server {
                     }
                     Ok((mut tx, mut rv)) = connection.accept_bi() => {
                         let req = rv.read_to_end(*msg_max_size).await?;
-                        let msg = bincode::deserialize::<Message>(&req)?;
+                        let msg = decode_msg(&req)?;
 
-                        if self.membership.read().contains(&msg.origin.into()) {
-                            return Err(eyre!("already joined: {}", msg.origin));
-                        }
+                        if let Message::EldegossMsg(EldegossMsg {
+                            origin,
+                            body: EldegossMsgBody::JoinReq(subscription_list),
+                            ..
+                        }) = msg
+                        {
+                            if self.membership.read().contains(&origin.into()) {
+                                return Err(eyre!("already joined: {}", origin));
+                            }
 
-                        if let MessageBody::JoinReq(subscription_list) = msg.body {
                             let mut neighbor_list = HashSet::new();
                             neighbor_list.insert((*id).into());
                             let member = Member {
-                                id: msg.origin.into(),
+                                id: origin.into(),
                                 subscription_list: HashSet::from_iter(subscription_list),
                                 neighbor_list,
                             };
                             self.membership.write().add_member(member.clone());
 
                             self.dispatch(
-                                Message::publish(
-                                    "".to_string(),
-                                    MessageBody::AddMember(member),
+                                Message::eldegoss(
+                                    0,
+                                    EldegossMsgBody::AddMember(member)
                                 ),
                                 false,
                             );
@@ -273,24 +289,24 @@ impl Server {
                             let memberlist = self.membership.read().clone();
                             debug!("memberlist: {:#?}", memberlist);
 
-                            let _ = write_msg(&mut tx, Message::to(
-                                msg.origin,
-                                MessageBody::JoinRsp(
-                                    memberlist,
+                            let _ = write_msg(
+                                &mut tx,
+                                Message::eldegoss(
+                                    0,
+                                    EldegossMsgBody::JoinRsp(memberlist),
                                 ),
-                            )).await;
+                            )
+                            .await;
 
                             let neighbor = Neighbor {
-                                id: msg.origin.into(),
+                                id: origin.into(),
                                 connection,
                                 server: self.clone(),
                             };
 
                             tokio::spawn(neighbor.clone().handle());
 
-                            self.neighbors
-                                .write()
-                                .insert(neighbor.id, neighbor.clone());
+                            self.neighbors.write().insert(neighbor.id, neighbor.clone());
 
                             info!("new neighbor({}): {remote_address}", neighbor.id);
                             Ok(())
@@ -306,7 +322,7 @@ impl Server {
 
     fn dispatch(&self, msg: Message, is_received: bool) {
         debug!("dispatch msg: {:?}", msg);
-        match (msg.to, msg.topic.as_str()) {
+        match (msg.to(), msg.topic().as_str()) {
             (0, "") => {
                 if is_received {
                     self.handle_recv_msg(&msg);
@@ -366,7 +382,7 @@ impl Server {
                                 });
                             if empty {
                                 self.neighbors.read().par_iter().for_each(|(_, neighbor)| {
-                                    if neighbor.id.to_u128() != msg.origin {
+                                    if neighbor.id.to_u128() != msg.origin() {
                                         self.to_send_msg(&neighbor.connection, msg.clone());
                                     }
                                 });
@@ -379,21 +395,33 @@ impl Server {
     }
 
     fn handle_recv_msg(&self, msg: &Message) {
-        match &msg.body {
-            MessageBody::AddMember(member) => {
+        match &msg {
+            Message::EldegossMsg(EldegossMsg {
+                body: EldegossMsgBody::AddMember(member),
+                ..
+            }) => {
                 self.membership.write().add_member(member.clone());
             }
-            MessageBody::RemoveMember(id) => {
+            Message::EldegossMsg(EldegossMsg {
+                body: EldegossMsgBody::RemoveMember(id),
+                ..
+            }) => {
                 self.membership.write().remove_member((*id).into());
             }
-            MessageBody::CheckReq(check_id) => {
+            Message::EldegossMsg(EldegossMsg {
+                body: EldegossMsgBody::CheckReq(check_id),
+                ..
+            }) => {
                 let result = self.neighbors.read().contains_key(&(*check_id).into());
-                self.gossip_msg(&Message::publish(
-                    "".to_string(),
-                    MessageBody::CheckRsp(*check_id, result),
+                self.gossip_msg(&Message::eldegoss(
+                    0,
+                    EldegossMsgBody::CheckRsp(*check_id, result),
                 ));
             }
-            MessageBody::CheckRsp(id, result) => {
+            Message::EldegossMsg(EldegossMsg {
+                body: EldegossMsgBody::CheckRsp(id, result),
+                ..
+            }) => {
                 if *result {
                     self.membership
                         .write()
@@ -410,7 +438,7 @@ impl Server {
     fn gossip_msg(&self, msg: &Message) {
         if self.neighbors.read().len() <= config().gossip_fanout {
             self.neighbors.read().par_iter().for_each(|(_, neighbor)| {
-                if neighbor.id.to_u128() != msg.origin {
+                if neighbor.id.to_u128() != msg.origin() {
                     self.to_send_msg(&neighbor.connection, msg.clone());
                 }
             });
@@ -420,7 +448,7 @@ impl Server {
                 .read()
                 .iter()
                 .filter_map(|(id, neighbor)| {
-                    if id.to_u128() != msg.origin {
+                    if id.to_u128() != msg.origin() {
                         Some(neighbor)
                     } else {
                         None
@@ -443,9 +471,9 @@ impl Server {
                 .par_iter()
                 .for_each(|neighbor_id| {
                     self.dispatch(
-                        Message::to(
+                        Message::eldegoss(
                             neighbor_id.to_u128(),
-                            MessageBody::CheckReq(check_id.to_u128()),
+                            EldegossMsgBody::CheckReq(check_id.to_u128()),
                         ),
                         false,
                     );
@@ -461,10 +489,7 @@ impl Server {
                 debug!("remove member: {}", remove_id);
                 membership.remove_member(remove_id);
                 self.dispatch(
-                    Message::publish(
-                        "".to_string(),
-                        MessageBody::RemoveMember(remove_id.to_u128()),
-                    ),
+                    Message::eldegoss(0, EldegossMsgBody::RemoveMember(remove_id.to_u128())),
                     false,
                 );
             }
@@ -504,15 +529,15 @@ impl Server {
 }
 
 pub async fn write_msg(send: &mut SendStream, mut msg: Message) -> Result<()> {
-    msg.origin = config().id;
-    send.write_all(&bincode::serialize(&msg)?).await?;
+    msg.set_origin(config().id);
+    send.write_all(&encode_msg(&msg)).await?;
     send.finish().await?;
     Ok(())
 }
 
 pub async fn read_msg(mut recv: RecvStream) -> Result<Message> {
     let req = recv.read_to_end(config().msg_max_size).await?;
-    Ok(bincode::deserialize::<Message>(&req)?)
+    decode_msg(&req)
 }
 
 async fn handle_stream(
@@ -521,9 +546,9 @@ async fn handle_stream(
     server: Server,
 ) -> Result<()> {
     let req = recv.read_to_end(config().msg_max_size).await?;
-    let mut msg = bincode::deserialize::<Message>(&req)?;
+    let mut msg = decode_msg(&req)?;
     debug!("recv msg: {:?}", msg);
-    msg.origin = neighbor_id.to_u128();
+    msg.set_origin(neighbor_id.to_u128());
 
     server.dispatch(msg, true);
     Ok(())
@@ -536,14 +561,10 @@ pub async fn send_uni_msg(connection: Connection, msg: Message) {
         .await
         .map_err(|e| error!("send_uni_msg{msg:?} open uni failed: {e}"))
         .unwrap();
-    send.write_all(
-        &bincode::serialize(&msg)
-            .map_err(|e| error!("send_uni_msg{msg:?} serialize failed: {:?}", e))
-            .unwrap(),
-    )
-    .await
-    .map_err(|e| error!("send_uni_msg{msg:?} write_all failed: {:?}", e))
-    .unwrap();
+    send.write_all(&encode_msg(&msg))
+        .await
+        .map_err(|e| error!("send_uni_msg{msg:?} write_all failed: {:?}", e))
+        .unwrap();
     send.finish()
         .await
         .map_err(|e| error!("send_uni_msg{msg:?} finish failed: {:?}", e))
@@ -557,7 +578,11 @@ mod test {
 
     use tokio::time::Instant;
 
-    use crate::{quic::Server, Config, Message, MessageBody};
+    use crate::{
+        protocol::{Msg, Message},
+        quic::Server,
+        Config,
+    };
 
     struct Stats {
         round_count: usize,
@@ -621,6 +646,7 @@ mod test {
         info!("id: {}", config.id);
 
         let server = Server::init(config);
+        server.subscription_list.write().insert("topic".to_owned());
 
         server.serve().await;
         let mut stats = Stats::new(1000);
@@ -643,6 +669,7 @@ mod test {
         };
         info!("id: {}", config.id);
         let server = Server::init(config);
+        server.subscription_list.write().insert("topic".to_owned());
 
         let mut send_test_msg_interval = tokio::time::interval(Duration::from_secs(1));
         let mut send_test_msg_interval1 = tokio::time::interval(Duration::from_micros(30));
@@ -652,7 +679,13 @@ mod test {
         let mut stats = Stats::new(10000);
         loop {
             send_test_msg_interval1.tick().await;
-            let msg = Message::to(1, MessageBody::Data(vec![0; 1024]));
+            let msg = Message::Msg(Msg {
+                origin: 0,
+                from: 0,
+                to: 0,
+                topic: "topic".to_owned(),
+                body: vec![0; 1024],
+            });
             server.send_msg(msg);
             stats.increment();
         }
