@@ -22,7 +22,7 @@ use crate::{Config, EldegossId, Member, Membership, Message, MessageBody};
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
-pub fn init_config(config: Config) {
+fn init_config(config: Config) {
     CONFIG.set(config).unwrap();
 }
 
@@ -70,9 +70,11 @@ type MsgForSend = (
     Receiver<(Connection, Message)>,
 );
 
+type MsgForRecv = (Sender<Message>, Receiver<Message>);
+
 #[derive(Debug, Clone)]
 pub struct Server {
-    pub msg_to_app: Sender<Message>,
+    pub msg_for_recv: MsgForRecv,
     pub msg_for_send: MsgForSend,
     pub neighbors: Arc<RwLock<HashMap<EldegossId, Neighbor>>>,
     pub membership: Arc<RwLock<Membership>>,
@@ -80,22 +82,27 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(tx: Sender<Message>) -> Self {
+    pub fn init(config_: Config) -> Self {
+        init_config(config_);
         let member = Member::new(config().id.into());
         let mut membership = Membership::default();
         membership.add_member(member);
         Self {
-            msg_to_app: tx,
+            msg_for_recv: flume::bounded(1024 * 1024),
+            msg_for_send: flume::bounded(1024 * 1024),
             neighbors: Arc::new(RwLock::new(HashMap::new())),
             membership: Arc::new(RwLock::new(membership)),
             subscription_list: Arc::new(RwLock::new(HashSet::new())),
-            msg_for_send: flume::unbounded(),
         }
     }
 
     pub async fn serve(&self) {
         tokio::spawn(self.clone().run_server());
         let _ = self.connect().await;
+    }
+
+    pub async fn recv_msg(&self) -> Result<Message> {
+        Ok(self.msg_for_recv.1.recv_async().await?)
     }
 
     pub fn send_msg(&self, msg: Message) {
@@ -309,7 +316,7 @@ impl Server {
             }
             (0, topic) => {
                 if is_received && self.subscription_list.read().contains(topic) {
-                    let _ = self.msg_to_app.send(msg.clone());
+                    let _ = self.msg_for_recv.0.send(msg.clone());
                 }
 
                 self.gossip_msg(&msg);
@@ -337,7 +344,7 @@ impl Server {
             (to, topic) => {
                 if to == config().id {
                     if is_received && self.subscription_list.read().contains(topic) {
-                        let _ = self.msg_to_app.send(msg.clone());
+                        let _ = self.msg_for_recv.0.send(msg.clone());
                     }
                 } else if let Some(subscribers) = self.membership.read().subscription_map.get(topic)
                 {
@@ -395,7 +402,7 @@ impl Server {
                 }
             }
             _ => {
-                let _ = self.msg_to_app.send(msg.clone());
+                let _ = self.msg_for_recv.0.send(msg.clone());
             }
         }
     }
@@ -550,10 +557,7 @@ mod test {
 
     use tokio::time::Instant;
 
-    use crate::{
-        quic::{config, init_config, Server},
-        Config, Message, MessageBody,
-    };
+    use crate::{quic::Server, Config, Message, MessageBody};
 
     struct Stats {
         round_count: usize,
@@ -606,22 +610,21 @@ mod test {
     async fn neighbor0() {
         common_x::log::init_log_filter("info");
 
-        init_config(Config {
+        let config = Config {
             id: 1,
             listen: "[::]:4721".to_string(),
             cert_path: "./config/cert/server_cert.pem".into(),
             private_key_path: "./config/cert/server_key.pem".into(),
             ca_path: "./config/cert/ca_cert.pem".into(),
             ..Default::default()
-        });
-        info!("id: {}", config().id);
+        };
+        info!("id: {}", config.id);
 
-        let (tx, rx) = flume::bounded(80000);
-        let server = Server::new(tx);
+        let server = Server::init(config);
 
         server.serve().await;
         let mut stats = Stats::new(1000);
-        while (rx.recv_async().await).is_ok() {
+        while (server.recv_msg().await).is_ok() {
             stats.increment();
         }
     }
@@ -630,23 +633,23 @@ mod test {
     async fn neighbor1() {
         common_x::log::init_log_filter("info");
 
-        init_config(Config {
+        let config = Config {
             connect: ["127.0.0.1:4721".to_string()].to_vec(),
             listen: "[::]:0".to_string(),
             cert_path: "./config/cert/client_cert.pem".into(),
             private_key_path: "./config/cert/client_key.pem".into(),
             ca_path: "./config/cert/ca_cert.pem".into(),
             ..Default::default()
-        });
-        info!("id: {}", config().id);
-        let server = Server::new(flume::unbounded().0);
+        };
+        info!("id: {}", config.id);
+        let server = Server::init(config);
 
         let mut send_test_msg_interval = tokio::time::interval(Duration::from_secs(1));
         let mut send_test_msg_interval1 = tokio::time::interval(Duration::from_micros(30));
         server.serve().await;
 
         send_test_msg_interval.tick().await;
-        let mut stats = Stats::new(1000);
+        let mut stats = Stats::new(10000);
         loop {
             send_test_msg_interval1.tick().await;
             let msg = Message::to(1, MessageBody::Data(vec![0; 1024]));
