@@ -220,6 +220,7 @@ pub enum MessageBody {
     JoinRsp(Membership),
     CheckReq(u128),
     CheckRsp(u128, bool),
+    Data(Vec<u8>),
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

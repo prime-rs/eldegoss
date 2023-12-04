@@ -59,39 +59,54 @@ impl Neighbor {
                 debug!("recv msg: {:?}", msg);
                 msg.origin = self.id.to_u128();
 
-                let _ = self.server.dispatch(msg, true);
+                self.server.dispatch(msg, true);
             }
         }
     }
 }
 
+type MsgForSend = (
+    Sender<(Connection, Message)>,
+    Receiver<(Connection, Message)>,
+);
+
 #[derive(Debug, Clone)]
 pub struct Server {
     pub msg_to_app: Sender<Message>,
-    pub msg_from_app: Receiver<Message>,
+    pub msg_for_send: MsgForSend,
     pub neighbors: Arc<RwLock<HashMap<EldegossId, Neighbor>>>,
     pub membership: Arc<RwLock<Membership>>,
     pub subscription_list: Arc<RwLock<HashSet<String>>>,
 }
 
 impl Server {
-    pub fn new(tx: Sender<Message>, rx: Receiver<Message>) -> Self {
+    pub fn new(tx: Sender<Message>) -> Self {
         let member = Member::new(config().id.into());
         let mut membership = Membership::default();
         membership.add_member(member);
         Self {
             msg_to_app: tx,
-            msg_from_app: rx,
             neighbors: Arc::new(RwLock::new(HashMap::new())),
             membership: Arc::new(RwLock::new(membership)),
             subscription_list: Arc::new(RwLock::new(HashSet::new())),
+            msg_for_send: flume::unbounded(),
         }
     }
 
-    pub async fn serve(self) -> Result<()> {
-        self.connect().await?;
-        self.run_server().await?;
-        Ok(())
+    pub async fn serve(&self) {
+        tokio::spawn(self.clone().run_server());
+        let _ = self.connect().await;
+    }
+
+    pub fn send_msg(&self, msg: Message) {
+        self.dispatch(msg, false)
+    }
+
+    fn to_send_msg(&self, connection: &Connection, mut msg: Message) {
+        msg.origin = config().id;
+        if let Err(e) = self.msg_for_send.0.send((connection.clone(), msg)) {
+            error!("to_send_msg failed: {:?}", e);
+        }
     }
 
     async fn connect(&self) -> Result<()> {
@@ -127,7 +142,7 @@ impl Server {
         Ok(())
     }
 
-    async fn run_server(&self) -> Result<()> {
+    async fn run_server(self) -> Result<()> {
         let Config {
             keep_alive_interval,
             cert_path,
@@ -150,8 +165,8 @@ impl Server {
             tokio::time::interval(Duration::from_secs(*check_neighbor_interval));
         loop {
             select! {
-                Ok(msg) = self.msg_from_app.recv_async() => {
-                    self.dispatch(msg, false)?;
+                Ok((connection, msg)) = self.msg_for_send.1.recv_async() => {
+                    send_uni_msg(connection, msg).await;
                 }
                 Some(connecting) = endpoint.accept() => {
                     debug!("connection incoming");
@@ -174,10 +189,11 @@ impl Server {
             _ = msg_timeout.tick() => {
                 Err(eyre!("join request timeout: {remote_address}"))
             }
-            Ok((tx, mut rv)) = connection.open_bi() => {
-                tokio::spawn(write_msg(tx, Message::to(0, MessageBody::JoinReq(
-                    self.subscription_list.read().clone().into_iter().collect(),
-                ))));
+            Ok((mut tx, mut rv)) = connection.open_bi() => {
+                let subscription_list = self.subscription_list.read().clone();
+                let _ = write_msg(&mut tx, Message::to(0, MessageBody::JoinReq(
+                    subscription_list.into_iter().collect(),
+                ))).await;
                 let req = rv.read_to_end(*msg_max_size).await?;
                 let msg = bincode::deserialize::<Message>(&req)?;
                 if let MessageBody::JoinRsp(membership) = msg.body {
@@ -221,7 +237,7 @@ impl Server {
                     _ = msg_timeout.tick() => {
                         Err(eyre!("join request timeout: {remote_address}"))
                     }
-                    Ok((tx, mut rv)) = connection.accept_bi() => {
+                    Ok((mut tx, mut rv)) = connection.accept_bi() => {
                         let req = rv.read_to_end(*msg_max_size).await?;
                         let msg = bincode::deserialize::<Message>(&req)?;
 
@@ -245,17 +261,17 @@ impl Server {
                                     MessageBody::AddMember(member),
                                 ),
                                 false,
-                            )?;
+                            );
 
                             let memberlist = self.membership.read().clone();
                             debug!("memberlist: {:#?}", memberlist);
 
-                            tokio::spawn(write_msg(tx, Message::to(
+                            let _ = write_msg(&mut tx, Message::to(
                                 msg.origin,
                                 MessageBody::JoinRsp(
                                     memberlist,
                                 ),
-                            )));
+                            )).await;
 
                             let neighbor = Neighbor {
                                 id: msg.origin.into(),
@@ -281,109 +297,30 @@ impl Server {
         }
     }
 
-    fn dispatch(&self, msg: Message, is_received: bool) -> Result<()> {
+    fn dispatch(&self, msg: Message, is_received: bool) {
         debug!("dispatch msg: {:?}", msg);
         match (msg.to, msg.topic.as_str()) {
             (0, "") => {
                 if is_received {
-                    match &msg.body {
-                        MessageBody::AddMember(member) => {
-                            self.membership.write().add_member(member.clone());
-                        }
-                        MessageBody::RemoveMember(id) => {
-                            self.membership.write().remove_member((*id).into());
-                        }
-                        MessageBody::CheckRsp(id, result) => {
-                            if *result {
-                                self.membership
-                                    .write()
-                                    .wait_for_remove_member_list
-                                    .retain(|id_| &id_.to_u128() != id);
-                            }
-                        }
-                        _ => {}
-                    }
+                    self.handle_recv_msg(&msg);
                 }
 
-                // TODO: 提取相同代码方法, gossip 发送控制层
-                let neighbor_ids = self
-                    .neighbors
-                    .read()
-                    .iter()
-                    .filter_map(|(id, neighbor)| {
-                        if id.to_u128() != msg.origin {
-                            Some(neighbor)
-                        } else {
-                            None
-                        }
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let mut rng = rand::thread_rng();
-                for _ in 0..config().gossip_fanout {
-                    let index = rng.gen_range(0..neighbor_ids.len());
-                    let connection = neighbor_ids[index].connection.clone();
-                    tokio::spawn(send_uni_msg(connection, msg.clone()));
-                }
+                self.gossip_msg(&msg);
             }
             (0, topic) => {
                 if is_received && self.subscription_list.read().contains(topic) {
                     let _ = self.msg_to_app.send(msg.clone());
                 }
-                if let Some(subscribers) = self.membership.read().subscription_map.get(topic) {
-                    subscribers.par_iter().for_each(|member_id| {
-                        if let Some(neighbor) = self.neighbors.read().get(member_id) {
-                            let connection = neighbor.connection.clone();
-                            tokio::spawn(send_uni_msg(connection, msg.clone()));
-                        }
-                    })
-                }
+
+                self.gossip_msg(&msg);
             }
             (to, "") => {
                 if to == config().id {
                     if is_received {
-                        match &msg.body {
-                            MessageBody::AddMember(member) => {
-                                self.membership.write().add_member(member.clone());
-                            }
-                            MessageBody::RemoveMember(id) => {
-                                self.membership.write().remove_member((*id).into());
-                            }
-                            MessageBody::CheckReq(check_id) => {
-                                let result =
-                                    self.neighbors.read().contains_key(&(*check_id).into());
-                                let neighbor_ids = self
-                                    .neighbors
-                                    .read()
-                                    .iter()
-                                    .filter_map(|(id, neighbor)| {
-                                        if id.to_u128() != msg.origin {
-                                            Some(neighbor)
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .cloned()
-                                    .collect::<Vec<_>>();
-                                let mut rng = rand::thread_rng();
-                                for _ in 0..config().gossip_fanout {
-                                    let index = rng.gen_range(0..neighbor_ids.len());
-                                    let connection = neighbor_ids[index].connection.clone();
-                                    tokio::spawn(send_uni_msg(
-                                        connection,
-                                        Message::publish(
-                                            "".to_string(),
-                                            MessageBody::CheckRsp(*check_id, result),
-                                        ),
-                                    ));
-                                }
-                            }
-                            _ => {}
-                        }
+                        self.handle_recv_msg(&msg);
                     }
                 } else if let Some(neighbor) = self.neighbors.read().get(&to.into()) {
-                    let connection = neighbor.connection.clone();
-                    tokio::spawn(send_uni_msg(connection, msg.clone()));
+                    self.to_send_msg(&neighbor.connection, msg.clone());
                 } else {
                     self.membership
                         .read()
@@ -392,8 +329,7 @@ impl Server {
                         .filter(|(_, member)| member.neighbor_list.contains(&to.into()))
                         .for_each(|(id, _)| {
                             if let Some(neighbor) = self.neighbors.read().get(id) {
-                                let connection = neighbor.connection.clone();
-                                tokio::spawn(send_uni_msg(connection, msg.clone()));
+                                self.to_send_msg(&neighbor.connection, msg.clone());
                             }
                         })
                 }
@@ -407,8 +343,7 @@ impl Server {
                 {
                     if let Some(subscriber_id) = subscribers.get(&to.into()) {
                         if let Some(neighbor) = self.neighbors.read().get(subscriber_id) {
-                            let connection = neighbor.connection.clone();
-                            tokio::spawn(send_uni_msg(connection, msg.clone()));
+                            self.to_send_msg(&neighbor.connection, msg.clone());
                         } else {
                             let mut empty = true;
                             self.membership
@@ -419,15 +354,13 @@ impl Server {
                                 .for_each(|(id, _)| {
                                     if let Some(neighbor) = self.neighbors.read().get(id) {
                                         empty = false;
-                                        let connection = neighbor.connection.clone();
-                                        tokio::spawn(send_uni_msg(connection, msg.clone()));
+                                        self.to_send_msg(&neighbor.connection, msg.clone());
                                     }
                                 });
                             if empty {
                                 self.neighbors.read().par_iter().for_each(|(_, neighbor)| {
                                     if neighbor.id.to_u128() != msg.origin {
-                                        let connection = neighbor.connection.clone();
-                                        tokio::spawn(send_uni_msg(connection, msg.clone()));
+                                        self.to_send_msg(&neighbor.connection, msg.clone());
                                     }
                                 });
                             }
@@ -436,7 +369,64 @@ impl Server {
                 }
             }
         }
-        Ok(())
+    }
+
+    fn handle_recv_msg(&self, msg: &Message) {
+        match &msg.body {
+            MessageBody::AddMember(member) => {
+                self.membership.write().add_member(member.clone());
+            }
+            MessageBody::RemoveMember(id) => {
+                self.membership.write().remove_member((*id).into());
+            }
+            MessageBody::CheckReq(check_id) => {
+                let result = self.neighbors.read().contains_key(&(*check_id).into());
+                self.gossip_msg(&Message::publish(
+                    "".to_string(),
+                    MessageBody::CheckRsp(*check_id, result),
+                ));
+            }
+            MessageBody::CheckRsp(id, result) => {
+                if *result {
+                    self.membership
+                        .write()
+                        .wait_for_remove_member_list
+                        .retain(|id_| &id_.to_u128() != id);
+                }
+            }
+            _ => {
+                let _ = self.msg_to_app.send(msg.clone());
+            }
+        }
+    }
+
+    fn gossip_msg(&self, msg: &Message) {
+        if self.neighbors.read().len() <= config().gossip_fanout {
+            self.neighbors.read().par_iter().for_each(|(_, neighbor)| {
+                if neighbor.id.to_u128() != msg.origin {
+                    self.to_send_msg(&neighbor.connection, msg.clone());
+                }
+            });
+        } else {
+            let neighbor_ids = self
+                .neighbors
+                .read()
+                .iter()
+                .filter_map(|(id, neighbor)| {
+                    if id.to_u128() != msg.origin {
+                        Some(neighbor)
+                    } else {
+                        None
+                    }
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut rng = rand::thread_rng();
+            for _ in 0..config().gossip_fanout {
+                let index = rng.gen_range(0..neighbor_ids.len());
+                self.to_send_msg(&neighbor_ids[index].connection, msg.clone());
+            }
+        }
     }
 
     fn check_member(&self, check_id: EldegossId) -> Result<bool> {
@@ -445,7 +435,7 @@ impl Server {
                 .neighbor_list
                 .par_iter()
                 .for_each(|neighbor_id| {
-                    let _ = self.dispatch(
+                    self.dispatch(
                         Message::to(
                             neighbor_id.to_u128(),
                             MessageBody::CheckReq(check_id.to_u128()),
@@ -463,7 +453,7 @@ impl Server {
             while let Some(remove_id) = membership.wait_for_remove_member_list.pop() {
                 debug!("remove member: {}", remove_id);
                 membership.remove_member(remove_id);
-                let _ = self.dispatch(
+                self.dispatch(
                     Message::publish(
                         "".to_string(),
                         MessageBody::RemoveMember(remove_id.to_u128()),
@@ -506,7 +496,7 @@ impl Server {
     }
 }
 
-pub async fn write_msg(mut send: SendStream, mut msg: Message) -> Result<()> {
+pub async fn write_msg(send: &mut SendStream, mut msg: Message) -> Result<()> {
     msg.origin = config().id;
     send.write_all(&bincode::serialize(&msg)?).await?;
     send.finish().await?;
@@ -528,64 +518,140 @@ async fn handle_stream(
     debug!("recv msg: {:?}", msg);
     msg.origin = neighbor_id.to_u128();
 
-    server.dispatch(msg, true)?;
+    server.dispatch(msg, true);
     Ok(())
 }
 
-pub async fn send_uni_msg(connection: Connection, mut msg: Message) -> Result<()> {
-    msg.origin = config().id;
-    let mut send = connection.open_uni().await?;
-    send.write_all(&bincode::serialize(&msg)?).await?;
-    send.finish().await?;
-    Ok(())
+pub async fn send_uni_msg(connection: Connection, msg: Message) {
+    let connection = connection.clone();
+    let mut send = connection
+        .open_uni()
+        .await
+        .map_err(|e| error!("send_uni_msg{msg:?} open uni failed: {e}"))
+        .unwrap();
+    send.write_all(
+        &bincode::serialize(&msg)
+            .map_err(|e| error!("send_uni_msg{msg:?} serialize failed: {:?}", e))
+            .unwrap(),
+    )
+    .await
+    .map_err(|e| error!("send_uni_msg{msg:?} write_all failed: {:?}", e))
+    .unwrap();
+    send.finish()
+        .await
+        .map_err(|e| error!("send_uni_msg{msg:?} finish failed: {:?}", e))
+        .unwrap();
 }
 
-#[tokio::test]
-async fn neighbor0() {
-    common_x::log::init_log_filter("debug");
+#[cfg(test)]
+mod test {
 
-    init_config(Config {
-        id: 1,
-        listen: "[::]:4721".to_string(),
-        cert_path: "./config/cert/server_cert.pem".into(),
-        private_key_path: "./config/cert/server_key.pem".into(),
-        ca_path: "./config/cert/ca_cert.pem".into(),
-        ..Default::default()
-    });
-    info!("id: {}", config().id);
-    let server = Server::new(flume::unbounded().0, flume::unbounded().1);
-    if let Err(e) = server.serve().await {
-        error!("server failed: {e}");
+    use std::time::Duration;
+
+    use tokio::time::Instant;
+
+    use crate::{
+        quic::{config, init_config, Server},
+        Config, Message, MessageBody,
+    };
+
+    struct Stats {
+        round_count: usize,
+        round_size: usize,
+        finished_rounds: usize,
+        round_start: Instant,
+        global_start: Option<Instant>,
     }
-}
-
-#[tokio::test]
-async fn neighbor1() {
-    common_x::log::init_log_filter("debug");
-
-    init_config(Config {
-        connect: ["127.0.0.1:4721".to_string()].to_vec(),
-        listen: "[::]:0".to_string(),
-        cert_path: "./config/cert/client_cert.pem".into(),
-        private_key_path: "./config/cert/client_key.pem".into(),
-        ca_path: "./config/cert/ca_cert.pem".into(),
-        ..Default::default()
-    });
-    info!("id: {}", config().id);
-    let (tx, rx) = flume::unbounded();
-    let server = Server::new(flume::unbounded().0, rx);
-
-    let mut send_test_msg_interval = tokio::time::interval(Duration::from_secs(100));
-
-    tokio::spawn(async move {
-        loop {
-            send_test_msg_interval.tick().await;
-            let msg = Message::to(1, MessageBody::Ok);
-            let _ = tx.send_async(msg).await;
+    impl Stats {
+        fn new(round_size: usize) -> Self {
+            Stats {
+                round_count: 0,
+                round_size,
+                finished_rounds: 0,
+                round_start: Instant::now(),
+                global_start: None,
+            }
         }
-    });
+        fn increment(&mut self) {
+            if self.round_count == 0 {
+                self.round_start = Instant::now();
+                if self.global_start.is_none() {
+                    self.global_start = Some(self.round_start)
+                }
+                self.round_count += 1;
+            } else if self.round_count < self.round_size {
+                self.round_count += 1;
+            } else {
+                self.print_round();
+                self.finished_rounds += 1;
+                self.round_count = 0;
+            }
+        }
+        fn print_round(&self) {
+            let elapsed = self.round_start.elapsed().as_secs_f64();
+            let throughtput = (self.round_size as f64) / elapsed;
+            info!("{throughtput} msg/s");
+        }
+    }
+    impl Drop for Stats {
+        fn drop(&mut self) {
+            let elapsed = self.global_start.unwrap().elapsed().as_secs_f64();
+            let total = self.round_size * self.finished_rounds + self.round_count;
+            let throughtput = total as f64 / elapsed;
+            info!("Received {total} messages over {elapsed:.2}s: {throughtput}msg/s");
+        }
+    }
 
-    if let Err(e) = server.serve().await {
-        error!("server failed: {e}");
+    #[tokio::test]
+    async fn neighbor0() {
+        common_x::log::init_log_filter("info");
+
+        init_config(Config {
+            id: 1,
+            listen: "[::]:4721".to_string(),
+            cert_path: "./config/cert/server_cert.pem".into(),
+            private_key_path: "./config/cert/server_key.pem".into(),
+            ca_path: "./config/cert/ca_cert.pem".into(),
+            ..Default::default()
+        });
+        info!("id: {}", config().id);
+
+        let (tx, rx) = flume::bounded(80000);
+        let server = Server::new(tx);
+
+        server.serve().await;
+        let mut stats = Stats::new(1000);
+        while (rx.recv_async().await).is_ok() {
+            stats.increment();
+        }
+    }
+
+    #[tokio::test]
+    async fn neighbor1() {
+        common_x::log::init_log_filter("info");
+
+        init_config(Config {
+            connect: ["127.0.0.1:4721".to_string()].to_vec(),
+            listen: "[::]:0".to_string(),
+            cert_path: "./config/cert/client_cert.pem".into(),
+            private_key_path: "./config/cert/client_key.pem".into(),
+            ca_path: "./config/cert/ca_cert.pem".into(),
+            ..Default::default()
+        });
+        info!("id: {}", config().id);
+        let server = Server::new(flume::unbounded().0);
+
+        let mut send_test_msg_interval = tokio::time::interval(Duration::from_secs(1));
+        let mut send_test_msg_interval1 = tokio::time::interval(Duration::from_micros(30));
+        server.serve().await;
+
+        send_test_msg_interval.tick().await;
+        let mut stats = Stats::new(1000);
+        loop {
+            send_test_msg_interval1.tick().await;
+            let msg = Message::to(1, MessageBody::Data(vec![0; 1024]));
+            server.send_msg(msg);
+            stats.increment();
+        }
     }
 }
