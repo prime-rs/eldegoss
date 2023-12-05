@@ -78,8 +78,8 @@ impl Server {
         let mut membership = Membership::default();
         membership.add_member(member);
         Self {
-            msg_for_recv: flume::bounded(1024 * 1024 * 2),
-            msg_for_send: flume::bounded(1024 * 1024 * 2),
+            msg_for_recv: flume::unbounded(),
+            msg_for_send: flume::unbounded(),
             neighbors: Arc::new(RwLock::new(HashMap::new())),
             membership: Arc::new(RwLock::new(membership)),
             subscription_list: Arc::new(RwLock::new(HashSet::new())),
@@ -101,8 +101,17 @@ impl Server {
 
     fn to_send_msg(&self, connection: &Connection, mut msg: Message) {
         msg.set_from(config().id);
-        if let Err(e) = self.msg_for_send.0.send((connection.clone(), msg)) {
-            error!("to_send_msg failed: {:?}", e);
+        let connection = connection.clone();
+        if let Err(e) = self.msg_for_send.0.send((connection, msg)) {
+            debug!("to_send_msg failed: {:?}", e);
+        }
+    }
+
+    fn to_recv_msg(&self, msg: Message) {
+        let msg_for_recv = self.msg_for_recv.0.clone();
+        let msg = msg.clone();
+        if let Err(e) = msg_for_recv.send_timeout(msg, Duration::from_millis(100)) {
+            debug!("to_recv_msg failed: {:?}", e);
         }
     }
 
@@ -161,12 +170,12 @@ impl Server {
         let mut check_neighbor_interval =
             tokio::time::interval(Duration::from_secs(*check_neighbor_interval));
 
-        let mut stats = crate::util::Stats::new(10000);
         loop {
             select! {
                 Ok((connection, msg)) = self.msg_for_send.1.recv_async() => {
-                    send_uni_msg(connection, msg).await;
-                    stats.increment();
+                    if let Err(e) = send_uni_msg(connection, msg).await {
+                        debug!("send_uni_msg failed: {:?}", e);
+                    }
                 }
                 Some(connecting) = endpoint.accept() => {
                     debug!("connection incoming");
@@ -322,7 +331,7 @@ impl Server {
             }
             (0, topic) => {
                 if is_received && self.subscription_list.read().contains(topic) {
-                    let _ = self.msg_for_recv.0.send(msg.clone());
+                    self.to_recv_msg(msg.clone());
                 }
 
                 self.gossip_msg(&msg);
@@ -350,7 +359,7 @@ impl Server {
             (to, topic) => {
                 if to == config().id {
                     if is_received && self.subscription_list.read().contains(topic) {
-                        let _ = self.msg_for_recv.0.send(msg.clone());
+                        self.to_recv_msg(msg.clone());
                     }
                 } else if let Some(subscribers) = self.membership.read().subscription_map.get(topic)
                 {
@@ -420,22 +429,21 @@ impl Server {
                 }
             }
             _ => {
-                let _ = self.msg_for_recv.0.send(msg.clone());
+                self.to_recv_msg(msg.clone());
             }
         }
     }
 
     fn gossip_msg(&self, msg: &Message) {
-        if self.neighbors.read().len() <= config().gossip_fanout {
-            self.neighbors.read().par_iter().for_each(|(_, neighbor)| {
+        let neighbors = self.neighbors.read();
+        if neighbors.len() <= config().gossip_fanout {
+            neighbors.iter().for_each(|(_, neighbor)| {
                 if neighbor.id.to_u128() != msg.origin() {
                     self.to_send_msg(&neighbor.connection, msg.clone());
                 }
             });
         } else {
-            let neighbor_ids = self
-                .neighbors
-                .read()
+            let neighbor_ids = neighbors
                 .iter()
                 .filter_map(|(id, neighbor)| {
                     if id.to_u128() != msg.origin() {
@@ -544,19 +552,16 @@ async fn handle_stream(
     Ok(())
 }
 
-pub async fn send_uni_msg(connection: Connection, msg: Message) {
-    let connection = connection.clone();
+pub async fn send_uni_msg(connection: Connection, msg: Message) -> Result<()> {
     let mut send = connection
         .open_uni()
         .await
-        .map_err(|e| error!("send_uni_msg{msg:?} open uni failed: {e}"))
-        .unwrap();
+        .map_err(|e| eyre!("send_uni_msg{msg:?} open uni failed: {e}"))?;
     send.write_all(&encode_msg(&msg))
         .await
-        .map_err(|e| error!("send_uni_msg{msg:?} write_all failed: {:?}", e))
-        .unwrap();
+        .map_err(|e| eyre!("send_uni_msg{msg:?} write_all failed: {:?}", e))?;
     send.finish()
         .await
-        .map_err(|e| error!("send_uni_msg{msg:?} finish failed: {:?}", e))
-        .unwrap();
+        .map_err(|e| eyre!("send_uni_msg{msg:?} finish failed: {:?}", e))?;
+    Ok(())
 }
