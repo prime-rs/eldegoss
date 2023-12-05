@@ -27,7 +27,6 @@ async fn main() {
     server.serve().await;
 
     send_test_msg_interval.tick().await;
-    let mut stats = eldegoss::util::Stats::new(10000);
     loop {
         let msg = Message::Msg(Msg {
             origin: 0,
@@ -36,7 +35,6 @@ async fn main() {
             topic: "topic".to_owned(),
             body: vec![0; 1024],
         });
-        server.send_msg(msg);
-        stats.increment();
+        server.send_msg(msg).await;
     }
 }
