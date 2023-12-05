@@ -321,13 +321,16 @@ impl Server {
     }
 
     async fn dispatch(&self, msg: Message, is_received: bool) {
-        debug!("dispatch msg: {:?}", msg);
+        debug!("dispatch({is_received}) msg: {:?}", msg);
         let neighbors = self.neighbors.read().clone();
         let membership = self.membership.read().clone();
         match (msg.to(), msg.topic().as_str()) {
             (0, "") => {
                 if is_received {
                     self.handle_recv_msg(&msg).await;
+                    if msg.origin() == config().id {
+                        return;
+                    }
                 }
 
                 self.gossip_msg(&msg).await;
@@ -335,6 +338,9 @@ impl Server {
             (0, topic) => {
                 if is_received && config().subscription_list.contains(&topic.to_owned()) {
                     self.to_recv_msg(msg.clone()).await;
+                    if msg.origin() == config().id {
+                        return;
+                    }
                 }
 
                 self.gossip_msg(&msg).await;
@@ -399,7 +405,8 @@ impl Server {
                             }
                             if empty {
                                 for (_, neighbor) in neighbors {
-                                    if neighbor.id.to_u128() != msg.origin() {
+                                    let neighbor_id = neighbor.id.to_u128();
+                                    if neighbor_id != msg.origin() && neighbor_id != msg.from() {
                                         self.to_send_msg(&neighbor.connection, msg.clone()).await;
                                     }
                                 }
@@ -457,7 +464,8 @@ impl Server {
         let neighbors = self.neighbors.read().clone();
         if neighbors.len() <= config().gossip_fanout {
             for (_, neighbor) in neighbors {
-                if neighbor.id.to_u128() != msg.origin() {
+                let neighbor_id = neighbor.id.to_u128();
+                if neighbor_id != msg.origin() && neighbor_id != msg.from() {
                     self.to_send_msg(&neighbor.connection, msg.clone()).await;
                 }
             }
@@ -465,7 +473,8 @@ impl Server {
             let neighbor_ids = neighbors
                 .iter()
                 .filter_map(|(id, neighbor)| {
-                    if id.to_u128() != msg.origin() {
+                    let id = id.to_u128();
+                    if id != msg.origin() && id != msg.from() {
                         Some(neighbor)
                     } else {
                         None
@@ -571,8 +580,7 @@ async fn handle_stream(
 ) -> Result<()> {
     let req = recv.read_to_end(config().msg_max_size).await?;
     let mut msg = decode_msg(&req)?;
-    debug!("recv msg: {:?}", msg);
-    msg.set_origin(neighbor_id.to_u128());
+    msg.set_from(neighbor_id.to_u128());
 
     server.dispatch(msg, true).await;
     Ok(())

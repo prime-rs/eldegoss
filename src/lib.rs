@@ -71,7 +71,7 @@ pub struct Config {
     pub check_neighbor_interval: u64,
     pub msg_timeout: u64,
     pub msg_max_size: usize,
-    // TODO: 解决消息循环问题
+
     pub gossip_fanout: usize,
 }
 

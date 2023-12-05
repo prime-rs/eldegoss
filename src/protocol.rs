@@ -7,7 +7,7 @@ use bitflags::bitflags;
 use color_eyre::{eyre::eyre, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::{Member, Membership};
+use crate::{quic::config, Member, Membership};
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -62,31 +62,21 @@ pub enum Message {
 }
 
 impl Message {
-    pub const fn eldegoss(to: u128, body: EldegossMsgBody) -> Self {
+    pub fn eldegoss(to: u128, body: EldegossMsgBody) -> Self {
         Self::EldegossMsg(EldegossMsg {
-            origin: 0,
-            from: 0,
+            origin: config().id,
+            from: config().id,
             to,
             body,
         })
     }
 
-    pub fn pub_msg(topic: String, body: Vec<u8>) -> Self {
+    pub fn msg(to: u128, topic: String, body: Vec<u8>) -> Self {
         Self::Msg(Msg {
-            origin: 0,
-            from: 0,
-            to: 0,
+            origin: config().id,
+            from: config().id,
+            to,
             topic,
-            body,
-        })
-    }
-
-    pub fn to_msg(to: u128, body: Vec<u8>) -> Self {
-        Self::Msg(Msg {
-            origin: 0,
-            from: 0,
-            to,
-            topic: "".to_owned(),
             body,
         })
     }
@@ -143,11 +133,11 @@ impl Message {
 
 #[derive(Debug, Clone, Default)]
 pub struct Msg {
-    pub origin: u128,
-    pub from: u128,
-    pub to: u128,
-    pub topic: String,
-    pub body: Vec<u8>,
+    origin: u128,
+    from: u128,
+    to: u128,
+    topic: String,
+    body: Vec<u8>,
 }
 
 pub fn encode_msg(msg: &Message) -> Vec<u8> {
