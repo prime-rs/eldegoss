@@ -100,9 +100,12 @@ impl Server {
 
     async fn to_send_msg(&self, connection: &Connection, mut msg: Message) {
         msg.set_from(config().id);
-        if let Err(e) = send_uni_msg(connection, msg).await {
-            debug!("send_uni_msg failed: {:?}", e);
-        }
+        let connection = connection.clone();
+        tokio::spawn(async move {
+            if let Err(e) = send_uni_msg(connection, msg).await {
+                debug!("send_uni_msg failed: {:?}", e);
+            }
+        });
     }
 
     async fn to_recv_msg(&self, msg: Message) {
@@ -568,7 +571,7 @@ async fn handle_stream(
     Ok(())
 }
 
-pub async fn send_uni_msg(connection: &Connection, msg: Message) -> Result<()> {
+pub async fn send_uni_msg(connection: Connection, msg: Message) -> Result<()> {
     let mut send = connection
         .open_uni()
         .await
