@@ -45,7 +45,7 @@ codegen-units = 1
 unsafe_code = "forbid"
 missing_copy_implementations = "warn"
 missing_debug_implementations = "warn"
-unused_crate_dependencies = "warn"
+# unused_crate_dependencies = "warn"
 unused_extern_crates = "warn"
 
 [lints.clippy]

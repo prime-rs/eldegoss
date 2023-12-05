@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 extern crate tracing as logger;
 
 pub mod quic;
-mod protocol;
+pub mod protocol;
 
 pub type QuicSendStream = quinn::SendStream;
 pub type QuicRecvStream = quinn::RecvStream;
@@ -55,21 +55,21 @@ impl From<u128> for EldegossId {
 #[serde(default)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    id: u128,
+    pub id: u128,
 
-    listen: String,
-    connect: Vec<String>,
+    pub listen: String,
+    pub connect: Vec<String>,
 
-    ca_path: String,
-    cert_path: String,
-    private_key_path: String,
+    pub ca_path: String,
+    pub cert_path: String,
+    pub private_key_path: String,
 
-    keep_alive_interval: u64,
-    check_neighbor_interval: u64,
-    msg_timeout: u64,
-    msg_max_size: usize,
+    pub keep_alive_interval: u64,
+    pub check_neighbor_interval: u64,
+    pub msg_timeout: u64,
+    pub msg_max_size: usize,
     // TODO: 解决消息循环问题
-    gossip_fanout: usize,
+    pub gossip_fanout: usize,
 }
 
 impl Default for Config {
