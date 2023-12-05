@@ -65,23 +65,21 @@ pub struct Server {
     pub msg_for_recv: MsgForRecv,
     pub neighbors: Arc<RwLock<HashMap<EldegossId, Neighbor>>>,
     pub membership: Arc<RwLock<Membership>>,
-    pub subscription_list: Arc<RwLock<HashSet<String>>>,
-
-    pub gossip_seed: usize,
 }
 
 impl Server {
     pub fn init(config_: Config) -> Self {
         init_config(config_);
-        let member = Member::new(config().id.into());
+        let member = Member::new(
+            config().id.into(),
+            HashSet::from_iter(config().subscription_list.clone()),
+        );
         let mut membership = Membership::default();
         membership.add_member(member);
         Self {
             msg_for_recv: flume::unbounded(),
             neighbors: Arc::new(RwLock::new(HashMap::new())),
             membership: Arc::new(RwLock::new(membership)),
-            subscription_list: Arc::new(RwLock::new(HashSet::new())),
-            gossip_seed: 0,
         }
     }
 
@@ -137,12 +135,21 @@ impl Server {
         for connect in connect {
             let mut endpoint = Endpoint::client("[::]:0".parse::<std::net::SocketAddr>()?)?;
             endpoint.set_default_client_config(client_config.clone());
-            let connection = endpoint
-                .connect(connect.parse::<std::net::SocketAddr>()?, "localhost")?
-                .await?;
-            if let Err(e) = self.clone().join(connection).await {
-                error!("join failed: {:?}", e);
-            }
+            let server = self.clone();
+            tokio::spawn(async move {
+                if let Ok(connection) = endpoint
+                    .connect(
+                        connect.parse::<std::net::SocketAddr>().unwrap(),
+                        "localhost",
+                    )
+                    .unwrap()
+                    .await
+                {
+                    if let Err(e) = server.join(connection).await {
+                        error!("join failed: {:?}", e);
+                    }
+                }
+            });
         }
         Ok(())
     }
@@ -184,6 +191,7 @@ impl Server {
         let Config {
             msg_timeout,
             msg_max_size,
+            subscription_list,
             ..
         } = config();
         let remote_address = connection.remote_address();
@@ -193,12 +201,11 @@ impl Server {
                 Err(eyre!("join request timeout: {remote_address}"))
             }
             Ok((mut tx, mut rv)) = connection.open_bi() => {
-                let subscription_list = self.subscription_list.read().clone();
                 let _ = write_msg(
                     &mut tx,
                     Message::eldegoss(
                         0,
-                        EldegossMsgBody::JoinReq(subscription_list.into_iter().collect()),
+                        EldegossMsgBody::JoinReq(subscription_list.clone()),
                     ),
                 )
                 .await;
@@ -326,7 +333,7 @@ impl Server {
                 self.gossip_msg(&msg).await;
             }
             (0, topic) => {
-                if is_received && self.subscription_list.read().contains(topic) {
+                if is_received && config().subscription_list.contains(&topic.to_owned()) {
                     self.to_recv_msg(msg.clone()).await;
                 }
 
@@ -362,7 +369,7 @@ impl Server {
             }
             (to, topic) => {
                 if to == config().id {
-                    if is_received && self.subscription_list.read().contains(topic) {
+                    if is_received && config().subscription_list.contains(&topic.to_owned()) {
                         self.to_recv_msg(msg.clone()).await;
                     }
                 } else if let Some(subscribers) = membership.subscription_map.get(topic) {

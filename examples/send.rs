@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use eldegoss::{
     protocol::{Message, Msg},
     quic::Server,
@@ -9,7 +7,7 @@ use tracing::info;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 30)]
 async fn main() {
-    common_x::log::init_log_filter("info");
+    common_x::log::init_log_filter("debug");
 
     let config = Config {
         connect: ["127.0.0.1:4721".to_string()].to_vec(),
@@ -17,26 +15,26 @@ async fn main() {
         cert_path: "./config/cert/client_cert.pem".into(),
         private_key_path: "./config/cert/client_key.pem".into(),
         ca_path: "./config/cert/ca_cert.pem".into(),
+        subscription_list: vec!["topic".to_owned()],
         ..Default::default()
     };
     info!("id: {}", config.id);
     let server = Server::init(config);
-    server.subscription_list.write().insert("topic".to_owned());
 
-    let mut send_test_msg_interval = tokio::time::interval(Duration::from_secs(1));
+    let mut send_test_msg_interval = tokio::time::interval(std::time::Duration::from_secs(10));
     server.serve().await;
 
-    send_test_msg_interval.tick().await;
-    let mut stats = eldegoss::util::Stats::new(1000);
+    // let mut stats = eldegoss::util::Stats::new(10000);
     loop {
+        send_test_msg_interval.tick().await;
         let msg = Message::Msg(Msg {
             origin: 0,
             from: 0,
-            to: 0,
+            to: 1,
             topic: "topic".to_owned(),
-            body: vec![0; 1024],
+            body: vec![],
         });
         server.send_msg(msg).await;
-        stats.increment();
+        // stats.increment();
     }
 }
