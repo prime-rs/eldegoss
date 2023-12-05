@@ -10,6 +10,7 @@ extern crate tracing as logger;
 
 pub mod quic;
 pub mod protocol;
+pub mod util;
 
 pub type QuicSendStream = quinn::SendStream;
 pub type QuicRecvStream = quinn::RecvStream;

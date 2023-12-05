@@ -42,28 +42,15 @@ pub struct Neighbor {
 
 impl Neighbor {
     async fn handle(self) {
-        select! {
-            _ = self.read_uni() => {}
-            _ = self.read_datagrams() => {}
-        }
+        self.read_uni().await;
     }
 
     // use for app msg
     async fn read_uni(&self) {
+        let mut stats = crate::util::Stats::new(10000);
         while let Ok(stream) = self.connection.accept_uni().await {
+            stats.increment();
             tokio::spawn(handle_stream(self.id, stream, self.server.clone()));
-        }
-    }
-
-    // TODO: use for app msg now, maybe use for other purpose
-    async fn read_datagrams(&self) {
-        while let Ok(datagram) = self.connection.read_datagram().await {
-            if let Ok(mut msg) = decode_msg(&datagram) {
-                debug!("recv msg: {:?}", msg);
-                msg.set_from(self.id.to_u128());
-
-                self.server.dispatch(msg, true);
-            }
         }
     }
 }
@@ -91,8 +78,8 @@ impl Server {
         let mut membership = Membership::default();
         membership.add_member(member);
         Self {
-            msg_for_recv: flume::unbounded(),
-            msg_for_send: flume::unbounded(),
+            msg_for_recv: flume::bounded(1024 * 1024 * 2),
+            msg_for_send: flume::bounded(1024 * 1024 * 2),
             neighbors: Arc::new(RwLock::new(HashMap::new())),
             membership: Arc::new(RwLock::new(membership)),
             subscription_list: Arc::new(RwLock::new(HashSet::new())),
@@ -173,10 +160,13 @@ impl Server {
         info!("listening on {}", endpoint.local_addr()?);
         let mut check_neighbor_interval =
             tokio::time::interval(Duration::from_secs(*check_neighbor_interval));
+
+        let mut stats = crate::util::Stats::new(10000);
         loop {
             select! {
                 Ok((connection, msg)) = self.msg_for_send.1.recv_async() => {
                     send_uni_msg(connection, msg).await;
+                    stats.increment();
                 }
                 Some(connecting) = endpoint.accept() => {
                     debug!("connection incoming");
@@ -486,7 +476,7 @@ impl Server {
         {
             let mut membership = self.membership.write();
             while let Some(remove_id) = membership.wait_for_remove_member_list.pop() {
-                debug!("remove member: {}", remove_id);
+                info!("remove member: {}", remove_id);
                 membership.remove_member(remove_id);
                 self.dispatch(
                     Message::eldegoss(0, EldegossMsgBody::RemoveMember(remove_id.to_u128())),
@@ -499,7 +489,7 @@ impl Server {
             loop {
                 let check_id = self.membership.write().get_check_member();
                 if let Some(check_id) = check_id {
-                    debug!("check member: {}", check_id);
+                    info!("check member: {}", check_id);
                     let _ = self.check_member(check_id);
                 } else {
                     break;
