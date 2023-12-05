@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 #[macro_use]
 extern crate tracing as logger;
 
-pub mod quic;
 pub mod protocol;
+pub mod quic;
 pub mod util;
 
 pub type QuicSendStream = quinn::SendStream;

@@ -52,25 +52,17 @@ impl Neighbor {
 
     // use for app msg
     async fn read_uni(&self) {
-        let mut stats = crate::util::Stats::new(10000);
         while let Ok(stream) = self.connection.accept_uni().await {
-            stats.increment();
             tokio::spawn(handle_stream(self.id, stream, self.server.clone()));
         }
     }
 }
-
-type MsgForSend = (
-    Sender<(Connection, Message)>,
-    Receiver<(Connection, Message)>,
-);
 
 type MsgForRecv = (Sender<Message>, Receiver<Message>);
 
 #[derive(Debug, Clone)]
 pub struct Server {
     pub msg_for_recv: MsgForRecv,
-    pub msg_for_send: MsgForSend,
     pub neighbors: Arc<RwLock<HashMap<EldegossId, Neighbor>>>,
     pub membership: Arc<RwLock<Membership>>,
     pub subscription_list: Arc<RwLock<HashSet<String>>>,
@@ -86,7 +78,6 @@ impl Server {
         membership.add_member(member);
         Self {
             msg_for_recv: flume::unbounded(),
-            msg_for_send: flume::unbounded(),
             neighbors: Arc::new(RwLock::new(HashMap::new())),
             membership: Arc::new(RwLock::new(membership)),
             subscription_list: Arc::new(RwLock::new(HashSet::new())),
@@ -109,9 +100,8 @@ impl Server {
 
     async fn to_send_msg(&self, connection: &Connection, mut msg: Message) {
         msg.set_from(config().id);
-        let connection = connection.clone();
-        if let Err(e) = self.msg_for_send.0.send_async((connection, msg)).await {
-            debug!("to_send_msg failed: {:?}", e);
+        if let Err(e) = send_uni_msg(connection, msg).await {
+            debug!("send_uni_msg failed: {:?}", e);
         }
     }
 
@@ -176,15 +166,8 @@ impl Server {
         let mut check_neighbor_interval =
             tokio::time::interval(Duration::from_secs(*check_neighbor_interval));
 
-        let mut stats = crate::util::Stats::new(10000);
         loop {
             select! {
-                Ok((connection, msg)) = self.msg_for_send.1.recv_async() => {
-                    if let Err(e) = send_uni_msg(connection, msg).await {
-                        debug!("send_uni_msg failed: {:?}", e);
-                    }
-                    stats.increment();
-                }
                 Some(connecting) = endpoint.accept() => {
                     debug!("connection incoming");
                     tokio::spawn(self.clone().handle_join_request(connecting));
@@ -585,7 +568,7 @@ async fn handle_stream(
     Ok(())
 }
 
-pub async fn send_uni_msg(connection: Connection, msg: Message) -> Result<()> {
+pub async fn send_uni_msg(connection: &Connection, msg: Message) -> Result<()> {
     let mut send = connection
         .open_uni()
         .await

@@ -19,8 +19,8 @@ async fn main() {
     server.subscription_list.write().insert("topic".to_owned());
 
     server.serve().await;
-    // let mut stats = eldegoss::util::Stats::new(10000);
+    let mut stats = eldegoss::util::Stats::new(1000);
     while (server.recv_msg().await).is_ok() {
-        // stats.increment();
+        stats.increment();
     }
 }

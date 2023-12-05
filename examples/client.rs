@@ -1,10 +1,4 @@
-use std::time::Duration;
-
-use eldegoss::{
-    protocol::{Message, Msg},
-    quic::Server,
-    Config,
-};
+use eldegoss::{quic::Server, Config};
 use tracing::info;
 
 #[tokio::main]
@@ -23,20 +17,10 @@ async fn main() {
     let server = Server::init(config);
     server.subscription_list.write().insert("topic".to_owned());
 
-    let mut send_test_msg_interval = tokio::time::interval(Duration::from_secs(1));
     server.serve().await;
 
-    send_test_msg_interval.tick().await;
     let mut stats = eldegoss::util::Stats::new(1000);
-    loop {
-        let msg = Message::Msg(Msg {
-            origin: 0,
-            from: 0,
-            to: 0,
-            topic: "topic".to_owned(),
-            body: vec![0; 1024],
-        });
-        server.send_msg(msg).await;
+    while (server.recv_msg().await).is_ok() {
         stats.increment();
     }
 }
