@@ -135,6 +135,7 @@ impl Membership {
     pub fn contains(&self, id: &EldegossId) -> bool {
         self.member_map.contains_key(id)
     }
+
     pub fn merge(&mut self, other: &Self) {
         for (subscription, ids) in &other.subscription_map {
             if let Some(self_ids) = self.subscription_map.get_mut(subscription) {
@@ -154,6 +155,7 @@ impl Membership {
                 self.member_map.insert(*id, member.clone());
             }
         }
+        debug!("after merge: {:#?}", self.member_map);
     }
 
     pub fn add_member(&mut self, member: Member) {
@@ -171,11 +173,13 @@ impl Membership {
                 neighbor.add_neighbor(member.id);
             }
         }
+        debug!("add member: {}", member.id);
         self.member_map.insert(member.id, member);
-        debug!("add member: {:#?}", self.member_map);
+        debug!("after add: {:#?}", self.member_map);
     }
 
     pub fn remove_member(&mut self, id: EldegossId) {
+        debug!("remove member: {id}");
         if let Some(member) = self.member_map.remove(&id) {
             for subscription in &member.subscription_list {
                 let mut empty = false;
@@ -195,7 +199,7 @@ impl Membership {
                 }
             }
         }
-        debug!("remove member: {:#?}", self.member_map);
+        debug!("after remove: {:#?}", self.member_map);
     }
 
     pub fn add_check_member(&mut self, id: EldegossId) {

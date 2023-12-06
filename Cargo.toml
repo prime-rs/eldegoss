@@ -31,16 +31,23 @@ tracing = "0.1"
 uhlc = "0.6"
 
 [profile.dev]
-debug = 0
-opt-level = 3
+debug = true
+opt-level = 0
 
-[profile.dev.package."*"]
+[profile.fast]
+inherits = "release"
 opt-level = 3
+debug = true
+debug-assertions = true
+overflow-checks = true
+lto = false
 
 [profile.release]
-lto = "thin"
-opt-level = "s"
+debug = false     # If you want debug symbol in release mode, set the env variable: RUSTFLAGS=-g
+lto = "fat"
 codegen-units = 1
+opt-level = 3
+panic = "abort"
 
 [lints.rust]
 unsafe_code = "forbid"

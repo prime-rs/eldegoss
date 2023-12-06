@@ -72,10 +72,10 @@ impl Neighbor {
         loop {
             match read_msg(&mut recv).await {
                 Ok(msg) => {
-                    self.server.dispatch(msg, true).await;
+                    self.server.dispatch(msg, self.id.to_u128()).await;
                 }
                 Err(e) => {
-                    debug!("handle recv msg failed: {:?}", e);
+                    debug!("handle recv msg failed: {e}");
                     break;
                 }
             }
@@ -126,9 +126,10 @@ impl Server {
         Ok(self.msg_for_recv.1.recv_async().await?)
     }
 
+    // TODO: 异步加速
     pub async fn send_msg(&self, mut msg: Message) {
         msg.set_origin(config().id);
-        self.dispatch(msg, false).await
+        self.dispatch(msg, 0).await
     }
 
     async fn to_recv_msg(&self, msg: Message) {
@@ -242,8 +243,6 @@ impl Server {
                 {
                     self.membership.write().await.merge(&membership);
 
-                    debug!("membership: {:#?}", self.membership.read());
-
                     let neighbor = Arc::new(Neighbor {
                         id: origin.into(),
                         connection,
@@ -310,14 +309,14 @@ impl Server {
                                 ),
                             ).await;
 
-                            let memberlist = self.membership.read().await.clone();
-                            debug!("memberlist: {:#?}", memberlist);
+                            let membership = self.membership.read().await.clone();
+                            debug!("memberlist: {:#?}", membership);
 
                             let _ = write_msg(
                                 &mut tx,
                                 Message::eldegoss(
                                     0,
-                                    EldegossMsgBody::JoinRsp(memberlist),
+                                    EldegossMsgBody::JoinRsp(membership),
                                 ),
                             )
                             .await;
@@ -349,27 +348,28 @@ impl Server {
         }
     }
 
-    async fn dispatch(&self, msg: Message, is_received: bool) {
-        debug!("dispatch({is_received}) msg: {:?}", msg);
+    // TODO: 按接收与发送拆分函数, 区分参数格式
+    async fn dispatch(&self, msg: Message, received_from: u128) {
+        // debug!("dispatch({received_from}) msg: {:?}", msg);
         let membership = self.membership.read().await.clone();
         let origin = msg.origin();
         match (msg.to(), msg.topic().as_str()) {
             (0, "") => {
-                self.gossip_msg(&msg, is_received).await;
-                if is_received {
+                self.gossip_msg(&msg, received_from).await;
+                if received_from != 0 {
                     self.handle_recv_msg(msg).await;
                 }
             }
             (0, topic) => {
-                self.gossip_msg(&msg, is_received).await;
+                self.gossip_msg(&msg, received_from).await;
 
-                if is_received && config().subscription_list.contains(&topic.to_owned()) {
+                if received_from != 0 && config().subscription_list.contains(&topic.to_owned()) {
                     self.to_recv_msg(msg).await;
                 }
             }
             (to, "") => {
                 if to == config().id {
-                    if is_received {
+                    if received_from != 0 {
                         self.handle_recv_msg(msg).await;
                     }
                 } else if let Some(neighbor) = self.neighbors.read().await.get(&to.into()) {
@@ -397,7 +397,8 @@ impl Server {
             }
             (to, topic) => {
                 if to == config().id {
-                    if is_received && config().subscription_list.contains(&topic.to_owned()) {
+                    if received_from != 0 && config().subscription_list.contains(&topic.to_owned())
+                    {
                         self.to_recv_msg(msg).await;
                     }
                 } else if let Some(subscribers) = membership.subscription_map.get(topic) {
@@ -428,7 +429,7 @@ impl Server {
                             if empty {
                                 for (_, neighbor) in self.neighbors.read().await.iter() {
                                     let neighbor_id = neighbor.id.to_u128();
-                                    if neighbor_id != origin {
+                                    if neighbor_id != origin && neighbor_id != received_from {
                                         neighbor.send_msg(&msg).await;
                                     }
                                 }
@@ -465,7 +466,7 @@ impl Server {
                     .contains_key(&(*check_id).into());
                 let mut msg = Message::eldegoss(0, EldegossMsgBody::CheckRsp(*check_id, result));
                 msg.set_origin(config().id);
-                self.gossip_msg(&msg, false).await;
+                self.gossip_msg(&msg, 0).await;
             }
             Message::EldegossMsg(EldegossMsg {
                 body: EldegossMsgBody::CheckRsp(id, result),
@@ -485,14 +486,14 @@ impl Server {
         }
     }
 
-    async fn gossip_msg(&self, msg: &Message, is_received: bool) {
-        if is_received && msg.origin() == config().id {
+    async fn gossip_msg(&self, msg: &Message, received_from: u128) {
+        if received_from != 0 && msg.origin() == config().id {
             return;
         }
         if self.neighbors.read().await.len() <= config().gossip_fanout {
             for (_, neighbor) in self.neighbors.read().await.iter() {
                 let neighbor_id = neighbor.id.to_u128();
-                if neighbor_id != msg.origin() {
+                if neighbor_id != msg.origin() && neighbor_id != received_from {
                     neighbor.send_msg(msg).await;
                 }
             }
@@ -504,7 +505,7 @@ impl Server {
                 .iter()
                 .filter_map(|(id, neighbor)| {
                     let id = id.to_u128();
-                    if id != msg.origin() {
+                    if id != msg.origin() && id != received_from {
                         Some(neighbor)
                     } else {
                         None
