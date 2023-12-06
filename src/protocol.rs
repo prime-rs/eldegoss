@@ -7,7 +7,7 @@ use bitflags::bitflags;
 use color_eyre::{eyre::eyre, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::{quic::config, Member, Membership};
+use crate::{Member, Membership};
 
 bitflags! {
     #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -49,7 +49,6 @@ pub enum EldegossMsgBody {
 #[derive(Debug)]
 pub struct EldegossMsg {
     pub origin: u128,
-    pub from: u128,
     pub to: u128,
     pub body: EldegossMsgBody,
 }
@@ -61,10 +60,9 @@ pub enum Message {
 }
 
 impl Message {
-    pub fn eldegoss(to: u128, body: EldegossMsgBody) -> Self {
+    pub const fn eldegoss(to: u128, body: EldegossMsgBody) -> Self {
         Self::EldegossMsg(EldegossMsg {
-            origin: config().id,
-            from: config().id,
+            origin: 0,
             to,
             body,
         })
@@ -72,8 +70,7 @@ impl Message {
 
     pub fn msg(to: u128, topic: String, body: Vec<u8>) -> Self {
         Self::Msg(Msg {
-            origin: config().id,
-            from: config().id,
+            origin: 0,
             to,
             topic,
             body,
@@ -84,13 +81,6 @@ impl Message {
         match self {
             Message::EldegossMsg(msg) => msg.origin,
             Message::Msg(msg) => msg.origin,
-        }
-    }
-
-    pub const fn from(&self) -> u128 {
-        match self {
-            Message::EldegossMsg(msg) => msg.from,
-            Message::Msg(msg) => msg.from,
         }
     }
 
@@ -115,13 +105,6 @@ impl Message {
         }
     }
 
-    pub fn set_from(&mut self, from: u128) {
-        match self {
-            Message::EldegossMsg(msg) => msg.from = from,
-            Message::Msg(msg) => msg.from = from,
-        }
-    }
-
     pub fn set_to(&mut self, to: u128) {
         match self {
             Message::EldegossMsg(msg) => msg.to = to,
@@ -133,7 +116,6 @@ impl Message {
 #[derive(Debug, Default)]
 pub struct Msg {
     origin: u128,
-    from: u128,
     to: u128,
     topic: String,
     body: Vec<u8>,
@@ -189,18 +171,12 @@ pub fn decode_msg(msg: &[u8]) -> Result<Message> {
         Flags::Eldegoss => {
             let to = u128::from_be_bytes(msg[17..33].try_into()?);
             let body = bincode::deserialize::<EldegossMsgBody>(&msg[33..])?;
-            Ok(Message::EldegossMsg(EldegossMsg {
-                origin,
-                to,
-                body,
-                from: 0,
-            }))
+            Ok(Message::EldegossMsg(EldegossMsg { origin, to, body }))
         }
         Flags::EldegossBroadcast => {
             let body = bincode::deserialize::<EldegossMsgBody>(&msg[17..])?;
             Ok(Message::EldegossMsg(EldegossMsg {
                 origin,
-                from: 0,
                 to: 0,
                 body,
             }))
@@ -212,7 +188,6 @@ pub fn decode_msg(msg: &[u8]) -> Result<Message> {
             let body = msg[37 + topic_len as usize..].to_vec();
             Ok(Message::Msg(Msg {
                 origin,
-                from: 0,
                 to,
                 topic,
                 body,
@@ -224,7 +199,6 @@ pub fn decode_msg(msg: &[u8]) -> Result<Message> {
             let body = msg[21 + topic_len as usize..].to_vec();
             Ok(Message::Msg(Msg {
                 origin,
-                from: 0,
                 to: 0,
                 topic,
                 body,
@@ -234,7 +208,6 @@ pub fn decode_msg(msg: &[u8]) -> Result<Message> {
             let body = msg[17..].to_vec();
             Ok(Message::Msg(Msg {
                 origin,
-                from: 0,
                 to: 0,
                 topic: "".to_owned(),
                 body,
@@ -245,7 +218,6 @@ pub fn decode_msg(msg: &[u8]) -> Result<Message> {
             let body = msg[33..].to_vec();
             Ok(Message::Msg(Msg {
                 origin,
-                from: 0,
                 to,
                 topic: "".to_owned(),
                 body,
@@ -268,7 +240,6 @@ fn test_flags() {
 fn test_encode_decode_msg() {
     let msg = Message::EldegossMsg(EldegossMsg {
         origin: 1,
-        from: 2,
         to: 3,
         body: EldegossMsgBody::AddMember(Member {
             id: 1.into(),
@@ -283,7 +254,6 @@ fn test_encode_decode_msg() {
 
     let msg = Message::Msg(Msg {
         origin: 1,
-        from: 0,
         to: 0,
         topic: "topic".to_owned(),
         body: vec![1, 2, 3],

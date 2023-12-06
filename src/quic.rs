@@ -27,11 +27,11 @@ use crate::{
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
 fn init_config(config: Config) {
-    CONFIG.set(config).unwrap();
+    CONFIG.set(config).unwrap()
 }
 
 pub fn config() -> &'static Config {
-    CONFIG.get().unwrap()
+    CONFIG.get_or_init(Config::default)
 }
 
 fn rng() -> &'static Mutex<ChaCha8Rng> {
@@ -71,8 +71,7 @@ impl Neighbor {
         let mut recv = self.recv.lock().await;
         loop {
             match read_msg(&mut recv).await {
-                Ok(mut msg) => {
-                    msg.set_from(self.id.to_u128());
+                Ok(msg) => {
                     self.server.dispatch(msg, true).await;
                 }
                 Err(e) => {
@@ -127,7 +126,8 @@ impl Server {
         Ok(self.msg_for_recv.1.recv_async().await?)
     }
 
-    pub async fn send_msg(&self, msg: Message) {
+    pub async fn send_msg(&self, mut msg: Message) {
+        msg.set_origin(config().id);
         self.dispatch(msg, false).await
     }
 
@@ -303,12 +303,11 @@ impl Server {
                             };
                             self.membership.write().await.add_member(member.clone());
 
-                            self.dispatch(
+                            self.send_msg(
                                 Message::eldegoss(
                                     0,
                                     EldegossMsgBody::AddMember(member)
                                 ),
-                                false,
                             ).await;
 
                             let memberlist = self.membership.read().await.clone();
@@ -354,7 +353,6 @@ impl Server {
         debug!("dispatch({is_received}) msg: {:?}", msg);
         let membership = self.membership.read().await.clone();
         let origin = msg.origin();
-        let from = msg.from();
         match (msg.to(), msg.topic().as_str()) {
             (0, "") => {
                 self.gossip_msg(&msg, is_received).await;
@@ -430,7 +428,7 @@ impl Server {
                             if empty {
                                 for (_, neighbor) in self.neighbors.read().await.iter() {
                                     let neighbor_id = neighbor.id.to_u128();
-                                    if neighbor_id != origin && neighbor_id != from {
+                                    if neighbor_id != origin {
                                         neighbor.send_msg(&msg).await;
                                     }
                                 }
@@ -465,11 +463,9 @@ impl Server {
                     .read()
                     .await
                     .contains_key(&(*check_id).into());
-                self.gossip_msg(
-                    &Message::eldegoss(0, EldegossMsgBody::CheckRsp(*check_id, result)),
-                    true,
-                )
-                .await;
+                let mut msg = Message::eldegoss(0, EldegossMsgBody::CheckRsp(*check_id, result));
+                msg.set_origin(config().id);
+                self.gossip_msg(&msg, false).await;
             }
             Message::EldegossMsg(EldegossMsg {
                 body: EldegossMsgBody::CheckRsp(id, result),
@@ -496,7 +492,7 @@ impl Server {
         if self.neighbors.read().await.len() <= config().gossip_fanout {
             for (_, neighbor) in self.neighbors.read().await.iter() {
                 let neighbor_id = neighbor.id.to_u128();
-                if neighbor_id != msg.origin() && neighbor_id != msg.from() {
+                if neighbor_id != msg.origin() {
                     neighbor.send_msg(msg).await;
                 }
             }
@@ -508,7 +504,7 @@ impl Server {
                 .iter()
                 .filter_map(|(id, neighbor)| {
                     let id = id.to_u128();
-                    if id != msg.origin() && id != msg.from() {
+                    if id != msg.origin() {
                         Some(neighbor)
                     } else {
                         None
@@ -527,13 +523,10 @@ impl Server {
         let membership = self.membership.read().await.clone();
         if let Some(check_member) = membership.member_map.get(&check_id) {
             for neighbor_id in &check_member.neighbor_list {
-                self.dispatch(
-                    Message::eldegoss(
-                        neighbor_id.to_u128(),
-                        EldegossMsgBody::CheckReq(check_id.to_u128()),
-                    ),
-                    false,
-                )
+                self.send_msg(Message::eldegoss(
+                    neighbor_id.to_u128(),
+                    EldegossMsgBody::CheckReq(check_id.to_u128()),
+                ))
                 .await;
             }
         }
@@ -554,10 +547,10 @@ impl Server {
             }
 
             for remove_id in remove_ids {
-                self.dispatch(
-                    Message::eldegoss(0, EldegossMsgBody::RemoveMember(remove_id.to_u128())),
-                    false,
-                )
+                self.send_msg(Message::eldegoss(
+                    0,
+                    EldegossMsgBody::RemoveMember(remove_id.to_u128()),
+                ))
                 .await;
             }
         }

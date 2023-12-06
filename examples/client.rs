@@ -3,7 +3,7 @@ use tracing::info;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 30)]
 async fn main() {
-    common_x::log::init_log_filter("debug");
+    common_x::log::init_log_filter("info");
 
     let config = Config {
         connect: ["127.0.0.1:4721".to_string(), "127.0.0.1:4722".to_string()].to_vec(),
