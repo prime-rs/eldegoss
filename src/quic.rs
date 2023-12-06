@@ -57,7 +57,7 @@ pub async fn write_msg(send: &mut SendStream, mut msg: Message) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Neighbor {
     pub id: EldegossId,
     pub connection: Connection,
@@ -67,7 +67,7 @@ pub struct Neighbor {
 }
 
 impl Neighbor {
-    async fn handle(self) {
+    async fn handle(&self) {
         let mut recv = self.recv.lock().await;
         loop {
             match read_msg(&mut recv).await {
@@ -96,7 +96,7 @@ type MsgForRecv = (Sender<Message>, Receiver<Message>);
 #[derive(Debug, Clone)]
 pub struct Server {
     pub msg_for_recv: MsgForRecv,
-    pub neighbors: Arc<RwLock<HashMap<EldegossId, Neighbor>>>,
+    pub neighbors: Arc<RwLock<HashMap<EldegossId, Arc<Neighbor>>>>,
     pub membership: Arc<RwLock<Membership>>,
 }
 
@@ -244,19 +244,23 @@ impl Server {
 
                     debug!("membership: {:#?}", self.membership.read());
 
-                    let neighbor = Neighbor {
+                    let neighbor = Arc::new(Neighbor {
                         id: origin.into(),
                         connection,
                         server: self.clone(),
                         send: Arc::new(Mutex::new(tx)),
                         recv: Arc::new(Mutex::new(rv)),
-                    };
+                    });
 
-                    tokio::spawn(neighbor.clone().handle());
+                    let neighbor_ = neighbor.clone();
+                    tokio::spawn(async move {
+                        neighbor_.handle().await;
+                    });
 
-                    self.neighbors.write().await.insert(neighbor.id, neighbor.clone());
+                    info!("new neighbor({}): {remote_address}", origin);
 
-                    info!("new neighbor({}): {remote_address}", neighbor.id);
+                    self.neighbors.write().await.insert(neighbor.id, neighbor);
+
                     Ok(())
                 } else {
                     Err(eyre!("invalid join response: {remote_address}"))
@@ -319,19 +323,22 @@ impl Server {
                             )
                             .await;
 
-                            let neighbor = Neighbor {
+                            let neighbor = Arc::new(Neighbor {
                                 id: origin.into(),
                                 connection,
                                 server: self.clone(),
                                 send: Arc::new(Mutex::new(tx)),
                                 recv: Arc::new(Mutex::new(rv)),
-                            };
+                            });
 
-                            tokio::spawn(neighbor.clone().handle());
+                            let neighbor_ = neighbor.clone();
+                            tokio::spawn(async move {
+                                neighbor_.handle().await;
+                            });
+                            info!("new neighbor({}): {remote_address}", origin);
 
-                            self.neighbors.write().await.insert(neighbor.id, neighbor.clone());
+                            self.neighbors.write().await.insert(neighbor.id, neighbor);
 
-                            info!("new neighbor({}): {remote_address}", neighbor.id);
                             Ok(())
                         } else {
                             Err(eyre!("invalid join response: {remote_address}"))
@@ -345,7 +352,6 @@ impl Server {
 
     async fn dispatch(&self, msg: Message, is_received: bool) {
         debug!("dispatch({is_received}) msg: {:?}", msg);
-        let neighbors = self.neighbors.read().await.clone();
         let membership = self.membership.read().await.clone();
         let origin = msg.origin();
         let from = msg.from();
@@ -368,7 +374,7 @@ impl Server {
                     if is_received {
                         self.handle_recv_msg(msg).await;
                     }
-                } else if let Some(neighbor) = neighbors.get(&to.into()) {
+                } else if let Some(neighbor) = self.neighbors.read().await.get(&to.into()) {
                     neighbor.send_msg(&msg).await;
                 } else {
                     let member_ids = membership
@@ -385,7 +391,7 @@ impl Server {
                         .collect::<Vec<_>>();
 
                     for id in member_ids {
-                        if let Some(neighbor) = neighbors.get(&id) {
+                        if let Some(neighbor) = self.neighbors.read().await.get(&id) {
                             neighbor.send_msg(&msg).await;
                         }
                     }
@@ -398,7 +404,7 @@ impl Server {
                     }
                 } else if let Some(subscribers) = membership.subscription_map.get(topic) {
                     if let Some(subscriber_id) = subscribers.get(&to.into()) {
-                        if let Some(neighbor) = neighbors.get(subscriber_id) {
+                        if let Some(neighbor) = self.neighbors.read().await.get(subscriber_id) {
                             neighbor.send_msg(&msg).await;
                         } else {
                             let mut empty = true;
@@ -416,13 +422,13 @@ impl Server {
                                 .collect::<Vec<_>>();
 
                             for id in member_ids {
-                                if let Some(neighbor) = neighbors.get(&id) {
+                                if let Some(neighbor) = self.neighbors.read().await.get(&id) {
                                     empty = false;
                                     neighbor.send_msg(&msg).await;
                                 }
                             }
                             if empty {
-                                for (_, neighbor) in neighbors {
+                                for (_, neighbor) in self.neighbors.read().await.iter() {
                                     let neighbor_id = neighbor.id.to_u128();
                                     if neighbor_id != origin && neighbor_id != from {
                                         neighbor.send_msg(&msg).await;
@@ -487,16 +493,18 @@ impl Server {
         if is_received && msg.origin() == config().id {
             return;
         }
-        let neighbors = self.neighbors.read().await.clone();
-        if neighbors.len() <= config().gossip_fanout {
-            for (_, neighbor) in neighbors {
+        if self.neighbors.read().await.len() <= config().gossip_fanout {
+            for (_, neighbor) in self.neighbors.read().await.iter() {
                 let neighbor_id = neighbor.id.to_u128();
                 if neighbor_id != msg.origin() && neighbor_id != msg.from() {
                     neighbor.send_msg(msg).await;
                 }
             }
         } else {
-            let neighbors = neighbors
+            let neighbors = self
+                .neighbors
+                .read()
+                .await
                 .iter()
                 .filter_map(|(id, neighbor)| {
                     let id = id.to_u128();
@@ -533,6 +541,7 @@ impl Server {
     }
 
     async fn maintain_membership(&self) {
+        // remove member
         {
             let mut remove_ids = vec![];
             {
@@ -553,6 +562,7 @@ impl Server {
             }
         }
 
+        // check member
         {
             loop {
                 let check_id = self.membership.write().await.get_check_member();
