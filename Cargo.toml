@@ -20,7 +20,6 @@ bitflags = "2.4"
 color-eyre = "0.6"
 common_x = { version = "0.2", features = ["cert", "log"] }
 flume = "0.11"
-parking_lot = "0.12"
 quinn = "0.10"
 rand = "0.8"
 rand_chacha = "0.3"
