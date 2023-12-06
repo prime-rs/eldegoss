@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::{quic::config, Member, Membership};
 
 bitflags! {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Flags: u8 {
         const Eldegoss = 0b10000000;
         const Broadcast = 0b01000000;
@@ -36,7 +36,7 @@ impl FromStr for Flags {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub enum EldegossMsgBody {
     AddMember(Member),
     RemoveMember(u128),
@@ -44,7 +44,6 @@ pub enum EldegossMsgBody {
     JoinRsp(Membership),
     CheckReq(u128),
     CheckRsp(u128, bool),
-    Data(Vec<u8>),
 }
 
 #[derive(Debug)]
@@ -141,9 +140,9 @@ pub struct Msg {
 }
 
 pub fn encode_msg(msg: &Message) -> Vec<u8> {
+    let mut buf = Vec::new();
     match msg {
         Message::EldegossMsg(msg) => {
-            let mut buf = Vec::new();
             if msg.to == 0 {
                 buf.push(Flags::EldegossBroadcast.bits());
                 buf.extend_from_slice(&msg.origin.to_be_bytes());
@@ -156,7 +155,6 @@ pub fn encode_msg(msg: &Message) -> Vec<u8> {
             buf
         }
         Message::Msg(msg) => {
-            let mut buf = Vec::new();
             if !msg.topic.is_empty() {
                 if msg.to == 0 {
                     buf.push(Flags::PubSubBroadcast.bits());

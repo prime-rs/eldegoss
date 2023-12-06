@@ -16,15 +16,12 @@ async fn main() {
         ..Default::default()
     };
     info!("id: {}", config.id);
-    let server = Server::init(config);
 
-    // let mut send_test_msg_interval = tokio::time::interval(std::time::Duration::from_secs(5));
-    server.serve().await;
+    let server = Server::serve(config).await;
 
     let mut stats = eldegoss::util::Stats::new(1000);
     loop {
-        // send_test_msg_interval.tick().await;
-        let msg = Message::msg(0, "topic".to_owned(), vec![0; 10240]);
+        let msg = Message::msg(0, "topic".to_owned(), vec![0; 1024]);
         server.send_msg(msg).await;
         stats.increment();
     }

@@ -33,28 +33,61 @@ fn init_config(config: Config) {
 pub fn config() -> &'static Config {
     CONFIG.get().unwrap()
 }
-pub fn rng() -> &'static Mutex<ChaCha8Rng> {
+
+fn rng() -> &'static Mutex<ChaCha8Rng> {
     static RNG: OnceLock<Mutex<ChaCha8Rng>> = OnceLock::new();
     RNG.get_or_init(|| Mutex::new(ChaCha8Rng::seed_from_u64(rand::random())))
+}
+
+async fn read_msg(recv: &mut RecvStream) -> Result<Message> {
+    let mut length = [0_u8, 0_u8, 0_u8, 0_u8];
+    recv.read_exact(&mut length).await?;
+    let n = u32::from_le_bytes(length) as usize;
+    let bytes = &mut vec![0_u8; n];
+    recv.read_exact(bytes).await?;
+    decode_msg(bytes)
+}
+
+pub async fn write_msg(send: &mut SendStream, mut msg: Message) -> Result<()> {
+    msg.set_origin(config().id);
+    let mut msg_bytes = encode_msg(&msg);
+    let mut bytes = (msg_bytes.len() as u32).to_le_bytes().to_vec();
+    bytes.append(&mut msg_bytes);
+    send.write_all(&bytes).await?;
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
 pub struct Neighbor {
     pub id: EldegossId,
     pub connection: Connection,
+    pub send: Arc<async_lock::Mutex<quinn::SendStream>>,
+    pub recv: Arc<async_lock::Mutex<quinn::RecvStream>>,
     pub server: Server,
 }
 
 impl Neighbor {
     async fn handle(self) {
-        self.read_uni().await;
+        let mut recv = self.recv.lock().await;
+        loop {
+            match read_msg(&mut recv).await {
+                Ok(mut msg) => {
+                    msg.set_from(self.id.to_u128());
+                    self.server.dispatch(msg, true).await;
+                }
+                Err(e) => {
+                    debug!("handle recv msg failed: {:?}", e);
+                    break;
+                }
+            }
+        }
     }
 
-    // use for app msg
-    async fn read_uni(&self) {
-        while let Ok(stream) = self.connection.accept_uni().await {
-            tokio::spawn(handle_stream(self.id, stream, self.server.clone()));
-        }
+    pub async fn send_msg(&self, msg: &Message) {
+        let mut msg_bytes = encode_msg(msg);
+        let mut bytes = (msg_bytes.len() as u32).to_le_bytes().to_vec();
+        bytes.append(&mut msg_bytes);
+        self.send.lock().await.write_all(&bytes).await.unwrap();
     }
 }
 
@@ -68,7 +101,7 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn init(config_: Config) -> Self {
+    fn init(config_: Config) -> Self {
         init_config(config_);
         let member = Member::new(
             config().id.into(),
@@ -83,9 +116,11 @@ impl Server {
         }
     }
 
-    pub async fn serve(&self) {
-        tokio::spawn(self.clone().run_server());
-        let _ = self.connect().await;
+    pub async fn serve(config: Config) -> Self {
+        let server = Self::init(config);
+        tokio::spawn(server.clone().run_server());
+        let _ = server.connect().await;
+        server
     }
 
     pub async fn recv_msg(&self) -> Result<Message> {
@@ -94,12 +129,6 @@ impl Server {
 
     pub async fn send_msg(&self, msg: Message) {
         self.dispatch(msg, false).await
-    }
-
-    async fn to_send_msg(&self, connection: &Connection, msg: &Message) {
-        if let Err(e) = send_uni_msg(connection, msg).await {
-            debug!("send_uni_msg failed: {:?}", e);
-        }
     }
 
     async fn to_recv_msg(&self, msg: Message) {
@@ -186,7 +215,6 @@ impl Server {
     async fn join(self, connection: Connection) -> Result<()> {
         let Config {
             msg_timeout,
-            msg_max_size,
             subscription_list,
             ..
         } = config();
@@ -205,8 +233,7 @@ impl Server {
                     ),
                 )
                 .await;
-                let req = rv.read_to_end(*msg_max_size).await?;
-                let msg = decode_msg(&req)?;
+                let msg = read_msg(&mut rv).await?;
                 if let Message::EldegossMsg(EldegossMsg {
                     origin,
                     body: EldegossMsgBody::JoinRsp(membership),
@@ -221,6 +248,8 @@ impl Server {
                         id: origin.into(),
                         connection,
                         server: self.clone(),
+                        send: Arc::new(async_lock::Mutex::new(tx)),
+                        recv: Arc::new(async_lock::Mutex::new(rv)),
                     };
 
                     tokio::spawn(neighbor.clone().handle());
@@ -238,10 +267,7 @@ impl Server {
 
     async fn handle_join_request(self, connecting: Connecting) -> Result<()> {
         let Config {
-            msg_timeout,
-            msg_max_size,
-            id,
-            ..
+            msg_timeout, id, ..
         } = config();
         match connecting.await {
             Ok(connection) => {
@@ -252,8 +278,7 @@ impl Server {
                         Err(eyre!("join request timeout: {remote_address}"))
                     }
                     Ok((mut tx, mut rv)) = connection.accept_bi() => {
-                        let req = rv.read_to_end(*msg_max_size).await?;
-                        let msg = decode_msg(&req)?;
+                        let msg = read_msg(&mut rv).await?;
 
                         if let Message::EldegossMsg(EldegossMsg {
                             origin,
@@ -298,6 +323,8 @@ impl Server {
                                 id: origin.into(),
                                 connection,
                                 server: self.clone(),
+                                send: Arc::new(async_lock::Mutex::new(tx)),
+                                recv: Arc::new(async_lock::Mutex::new(rv)),
                             };
 
                             tokio::spawn(neighbor.clone().handle());
@@ -342,7 +369,7 @@ impl Server {
                         self.handle_recv_msg(msg).await;
                     }
                 } else if let Some(neighbor) = neighbors.get(&to.into()) {
-                    self.to_send_msg(&neighbor.connection, &msg).await;
+                    neighbor.send_msg(&msg).await;
                 } else {
                     let member_ids = membership
                         .member_map
@@ -359,7 +386,7 @@ impl Server {
 
                     for id in member_ids {
                         if let Some(neighbor) = neighbors.get(&id) {
-                            self.to_send_msg(&neighbor.connection, &msg).await;
+                            neighbor.send_msg(&msg).await;
                         }
                     }
                 }
@@ -372,7 +399,7 @@ impl Server {
                 } else if let Some(subscribers) = membership.subscription_map.get(topic) {
                     if let Some(subscriber_id) = subscribers.get(&to.into()) {
                         if let Some(neighbor) = neighbors.get(subscriber_id) {
-                            self.to_send_msg(&neighbor.connection, &msg).await;
+                            neighbor.send_msg(&msg).await;
                         } else {
                             let mut empty = true;
                             let member_ids = membership
@@ -391,14 +418,14 @@ impl Server {
                             for id in member_ids {
                                 if let Some(neighbor) = neighbors.get(&id) {
                                     empty = false;
-                                    self.to_send_msg(&neighbor.connection, &msg).await;
+                                    neighbor.send_msg(&msg).await;
                                 }
                             }
                             if empty {
                                 for (_, neighbor) in neighbors {
                                     let neighbor_id = neighbor.id.to_u128();
                                     if neighbor_id != origin && neighbor_id != from {
-                                        self.to_send_msg(&neighbor.connection, &msg).await;
+                                        neighbor.send_msg(&msg).await;
                                     }
                                 }
                             }
@@ -460,11 +487,11 @@ impl Server {
             for (_, neighbor) in neighbors {
                 let neighbor_id = neighbor.id.to_u128();
                 if neighbor_id != msg.origin() && neighbor_id != msg.from() {
-                    self.to_send_msg(&neighbor.connection, msg).await;
+                    neighbor.send_msg(msg).await;
                 }
             }
         } else {
-            let neighbor_ids = neighbors
+            let neighbors = neighbors
                 .iter()
                 .filter_map(|(id, neighbor)| {
                     let id = id.to_u128();
@@ -477,8 +504,8 @@ impl Server {
                 .cloned()
                 .collect::<Vec<_>>();
             for _ in 0..config().gossip_fanout {
-                let index = rng().lock().gen_range(0..neighbor_ids.len());
-                self.to_send_msg(&neighbor_ids[index].connection, msg).await;
+                let index = rng().lock().gen_range(0..neighbors.len());
+                neighbors[index].send_msg(msg).await;
             }
         }
     }
@@ -552,43 +579,4 @@ impl Server {
             }
         }
     }
-}
-
-pub async fn write_msg(send: &mut SendStream, mut msg: Message) -> Result<()> {
-    msg.set_origin(config().id);
-    send.write_all(&encode_msg(&msg)).await?;
-    send.finish().await?;
-    Ok(())
-}
-
-pub async fn read_msg(mut recv: RecvStream) -> Result<Message> {
-    let req = recv.read_to_end(config().msg_max_size).await?;
-    decode_msg(&req)
-}
-
-async fn handle_stream(
-    neighbor_id: EldegossId,
-    mut recv: RecvStream,
-    server: Server,
-) -> Result<()> {
-    let req = recv.read_to_end(config().msg_max_size).await?;
-    let mut msg = decode_msg(&req)?;
-    msg.set_from(neighbor_id.to_u128());
-
-    server.dispatch(msg, true).await;
-    Ok(())
-}
-
-pub async fn send_uni_msg(connection: &Connection, msg: &Message) -> Result<()> {
-    let mut send = connection
-        .open_uni()
-        .await
-        .map_err(|e| eyre!("send_uni_msg{msg:?} open uni failed: {e}"))?;
-    send.write_all(&encode_msg(msg))
-        .await
-        .map_err(|e| eyre!("send_uni_msg{msg:?} write_all failed: {:?}", e))?;
-    send.finish()
-        .await
-        .map_err(|e| eyre!("send_uni_msg{msg:?} finish failed: {:?}", e))?;
-    Ok(())
 }

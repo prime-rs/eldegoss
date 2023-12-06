@@ -52,7 +52,7 @@ impl From<u128> for EldegossId {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(default)]
 #[serde(deny_unknown_fields)]
 pub struct Config {

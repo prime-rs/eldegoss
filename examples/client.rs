@@ -15,9 +15,8 @@ async fn main() {
         ..Default::default()
     };
     info!("id: {}", config.id);
-    let server = Server::init(config);
 
-    server.serve().await;
+    let server = Server::serve(config).await;
 
     let mut stats = eldegoss::util::Stats::new(1000);
     while (server.recv_msg().await).is_ok() {
