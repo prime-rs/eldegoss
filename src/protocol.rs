@@ -47,7 +47,7 @@ pub enum EldegossMsgBody {
     Data(Vec<u8>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct EldegossMsg {
     pub origin: u128,
     pub from: u128,
@@ -55,7 +55,7 @@ pub struct EldegossMsg {
     pub body: EldegossMsgBody,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Message {
     EldegossMsg(EldegossMsg),
     Msg(Msg),
@@ -131,7 +131,7 @@ impl Message {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct Msg {
     origin: u128,
     from: u128,

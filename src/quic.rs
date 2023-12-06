@@ -96,14 +96,10 @@ impl Server {
         self.dispatch(msg, false).await
     }
 
-    async fn to_send_msg(&self, connection: &Connection, mut msg: Message) {
-        msg.set_from(config().id);
-        let connection = connection.clone();
-        tokio::spawn(async move {
-            if let Err(e) = send_uni_msg(connection, msg).await {
-                debug!("send_uni_msg failed: {:?}", e);
-            }
-        });
+    async fn to_send_msg(&self, connection: &Connection, msg: &Message) {
+        if let Err(e) = send_uni_msg(connection, msg).await {
+            debug!("send_uni_msg failed: {:?}", e);
+        }
     }
 
     async fn to_recv_msg(&self, msg: Message) {
@@ -324,34 +320,29 @@ impl Server {
         debug!("dispatch({is_received}) msg: {:?}", msg);
         let neighbors = self.neighbors.read().clone();
         let membership = self.membership.read().clone();
+        let origin = msg.origin();
+        let from = msg.from();
         match (msg.to(), msg.topic().as_str()) {
             (0, "") => {
+                self.gossip_msg(&msg, is_received).await;
                 if is_received {
-                    self.handle_recv_msg(&msg).await;
-                    if msg.origin() == config().id {
-                        return;
-                    }
+                    self.handle_recv_msg(msg).await;
                 }
-
-                self.gossip_msg(&msg).await;
             }
             (0, topic) => {
-                if is_received && config().subscription_list.contains(&topic.to_owned()) {
-                    self.to_recv_msg(msg.clone()).await;
-                    if msg.origin() == config().id {
-                        return;
-                    }
-                }
+                self.gossip_msg(&msg, is_received).await;
 
-                self.gossip_msg(&msg).await;
+                if is_received && config().subscription_list.contains(&topic.to_owned()) {
+                    self.to_recv_msg(msg).await;
+                }
             }
             (to, "") => {
                 if to == config().id {
                     if is_received {
-                        self.handle_recv_msg(&msg).await;
+                        self.handle_recv_msg(msg).await;
                     }
                 } else if let Some(neighbor) = neighbors.get(&to.into()) {
-                    self.to_send_msg(&neighbor.connection, msg.clone()).await;
+                    self.to_send_msg(&neighbor.connection, &msg).await;
                 } else {
                     let member_ids = membership
                         .member_map
@@ -368,7 +359,7 @@ impl Server {
 
                     for id in member_ids {
                         if let Some(neighbor) = neighbors.get(&id) {
-                            self.to_send_msg(&neighbor.connection, msg.clone()).await;
+                            self.to_send_msg(&neighbor.connection, &msg).await;
                         }
                     }
                 }
@@ -376,12 +367,12 @@ impl Server {
             (to, topic) => {
                 if to == config().id {
                     if is_received && config().subscription_list.contains(&topic.to_owned()) {
-                        self.to_recv_msg(msg.clone()).await;
+                        self.to_recv_msg(msg).await;
                     }
                 } else if let Some(subscribers) = membership.subscription_map.get(topic) {
                     if let Some(subscriber_id) = subscribers.get(&to.into()) {
                         if let Some(neighbor) = neighbors.get(subscriber_id) {
-                            self.to_send_msg(&neighbor.connection, msg.clone()).await;
+                            self.to_send_msg(&neighbor.connection, &msg).await;
                         } else {
                             let mut empty = true;
                             let member_ids = membership
@@ -400,14 +391,14 @@ impl Server {
                             for id in member_ids {
                                 if let Some(neighbor) = neighbors.get(&id) {
                                     empty = false;
-                                    self.to_send_msg(&neighbor.connection, msg.clone()).await;
+                                    self.to_send_msg(&neighbor.connection, &msg).await;
                                 }
                             }
                             if empty {
                                 for (_, neighbor) in neighbors {
                                     let neighbor_id = neighbor.id.to_u128();
-                                    if neighbor_id != msg.origin() && neighbor_id != msg.from() {
-                                        self.to_send_msg(&neighbor.connection, msg.clone()).await;
+                                    if neighbor_id != origin && neighbor_id != from {
+                                        self.to_send_msg(&neighbor.connection, &msg).await;
                                     }
                                 }
                             }
@@ -418,7 +409,7 @@ impl Server {
         }
     }
 
-    async fn handle_recv_msg(&self, msg: &Message) {
+    async fn handle_recv_msg(&self, msg: Message) {
         match &msg {
             Message::EldegossMsg(EldegossMsg {
                 body: EldegossMsgBody::AddMember(member),
@@ -437,10 +428,10 @@ impl Server {
                 ..
             }) => {
                 let result = self.neighbors.read().contains_key(&(*check_id).into());
-                self.gossip_msg(&Message::eldegoss(
-                    0,
-                    EldegossMsgBody::CheckRsp(*check_id, result),
-                ))
+                self.gossip_msg(
+                    &Message::eldegoss(0, EldegossMsgBody::CheckRsp(*check_id, result)),
+                    true,
+                )
                 .await;
             }
             Message::EldegossMsg(EldegossMsg {
@@ -455,18 +446,21 @@ impl Server {
                 }
             }
             _ => {
-                self.to_recv_msg(msg.clone()).await;
+                self.to_recv_msg(msg).await;
             }
         }
     }
 
-    async fn gossip_msg(&self, msg: &Message) {
+    async fn gossip_msg(&self, msg: &Message, is_received: bool) {
+        if is_received && msg.origin() == config().id {
+            return;
+        }
         let neighbors = self.neighbors.read().clone();
         if neighbors.len() <= config().gossip_fanout {
             for (_, neighbor) in neighbors {
                 let neighbor_id = neighbor.id.to_u128();
                 if neighbor_id != msg.origin() && neighbor_id != msg.from() {
-                    self.to_send_msg(&neighbor.connection, msg.clone()).await;
+                    self.to_send_msg(&neighbor.connection, msg).await;
                 }
             }
         } else {
@@ -484,8 +478,7 @@ impl Server {
                 .collect::<Vec<_>>();
             for _ in 0..config().gossip_fanout {
                 let index = rng().lock().gen_range(0..neighbor_ids.len());
-                self.to_send_msg(&neighbor_ids[index].connection, msg.clone())
-                    .await;
+                self.to_send_msg(&neighbor_ids[index].connection, msg).await;
             }
         }
     }
@@ -586,12 +579,12 @@ async fn handle_stream(
     Ok(())
 }
 
-pub async fn send_uni_msg(connection: Connection, msg: Message) -> Result<()> {
+pub async fn send_uni_msg(connection: &Connection, msg: &Message) -> Result<()> {
     let mut send = connection
         .open_uni()
         .await
         .map_err(|e| eyre!("send_uni_msg{msg:?} open uni failed: {e}"))?;
-    send.write_all(&encode_msg(&msg))
+    send.write_all(&encode_msg(msg))
         .await
         .map_err(|e| eyre!("send_uni_msg{msg:?} write_all failed: {:?}", e))?;
     send.finish()

@@ -3,7 +3,7 @@ use tracing::info;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 30)]
 async fn main() {
-    common_x::log::init_log_filter("debug");
+    common_x::log::init_log_filter("info");
 
     let config = Config {
         id: 1,
@@ -19,7 +19,7 @@ async fn main() {
     let server = Server::init(config);
 
     server.serve().await;
-    let mut stats = eldegoss::util::Stats::new(10000);
+    let mut stats = eldegoss::util::Stats::new(1000);
     while (server.recv_msg().await).is_ok() {
         stats.increment();
     }
