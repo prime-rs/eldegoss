@@ -60,6 +60,7 @@ pub async fn write_msg(send: &mut SendStream, mut msg: Message) -> Result<()> {
 #[derive(Debug)]
 pub struct Neighbor {
     pub id: EldegossId,
+    pub locator: Arc<Mutex<String>>,
     pub connection: Connection,
     pub send: Arc<Mutex<quinn::SendStream>>,
     pub recv: Arc<Mutex<quinn::RecvStream>>,
@@ -75,7 +76,7 @@ impl Neighbor {
                     self.server.dispatch(msg, self.id.to_u128()).await;
                 }
                 Err(e) => {
-                    debug!("handle recv msg failed: {e}");
+                    debug!("neighbor handle recv msg failed: {e}");
                     break;
                 }
             }
@@ -86,7 +87,13 @@ impl Neighbor {
         let mut msg_bytes = encode_msg(msg);
         let mut bytes = (msg_bytes.len() as u32).to_le_bytes().to_vec();
         bytes.append(&mut msg_bytes);
-        self.send.lock().await.write_all(&bytes).await.unwrap();
+        if let Err(e) = self.send.lock().await.write_all(&bytes).await {
+            debug!("neighbor({}) send msg failed: {e:?}", self.id);
+        }
+    }
+
+    pub async fn set_locator(&self, locator: String) {
+        *self.locator.lock().await = locator;
     }
 }
 
@@ -97,6 +104,7 @@ pub struct Server {
     pub msg_for_recv: MsgForRecv,
     pub neighbors: Arc<RwLock<HashMap<EldegossId, Arc<Neighbor>>>>,
     pub membership: Arc<RwLock<Membership>>,
+    pub connect_neighbors: Arc<RwLock<HashMap<String, u128>>>,
 }
 
 impl Server {
@@ -110,8 +118,9 @@ impl Server {
         membership.add_member(member);
         Self {
             msg_for_recv: flume::unbounded(),
-            neighbors: Arc::new(RwLock::new(HashMap::new())),
+            neighbors: Default::default(),
             membership: Arc::new(RwLock::new(membership)),
+            connect_neighbors: Default::default(),
         }
     }
 
@@ -158,25 +167,49 @@ impl Server {
         transport_config.keep_alive_interval(Some(Duration::from_secs(*keep_alive_interval)));
         client_config.transport_config(Arc::new(transport_config));
 
-        for connect in connect {
-            let mut endpoint = Endpoint::client("[::]:0".parse::<std::net::SocketAddr>()?)?;
-            endpoint.set_default_client_config(client_config.clone());
-            let server = self.clone();
-            tokio::spawn(async move {
-                if let Ok(connection) = endpoint
-                    .connect(
-                        connect.parse::<std::net::SocketAddr>().unwrap(),
-                        "localhost",
-                    )
-                    .unwrap()
-                    .await
-                {
-                    if let Err(e) = server.join(connection).await {
-                        error!("join failed: {:?}", e);
-                    }
-                }
-            });
+        for conn in connect {
+            if self.connect_neighbors.read().await.contains_key(conn) {
+                continue;
+            }
+            let _ = self.connect_to(&client_config, conn.to_string());
         }
+
+        let server = self.clone();
+        tokio::spawn(async move {
+            let Config { connect, .. } = &config();
+            let mut interval =
+                tokio::time::interval(Duration::from_secs(config().keep_alive_interval));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                for conn in connect {
+                    if server.connect_neighbors.read().await.contains_key(conn) {
+                        continue;
+                    }
+                    info!("reconnect to: {conn}");
+                    let _ = server.connect_to(&client_config, conn.to_string());
+                }
+            }
+        });
+        Ok(())
+    }
+
+    fn connect_to(&self, client_config: &ClientConfig, connect: String) -> Result<()> {
+        let mut endpoint = Endpoint::client("[::]:0".parse::<std::net::SocketAddr>()?)?;
+        endpoint.set_default_client_config(client_config.clone());
+        let server = self.clone();
+        tokio::spawn(async move {
+            if let Ok(connection) = endpoint
+                .connect(
+                    connect.parse::<std::net::SocketAddr>().unwrap(),
+                    "localhost",
+                )
+                .unwrap()
+                .await
+            {
+                let _ = server.join(connection, connect).await;
+            }
+        });
         Ok(())
     }
 
@@ -201,7 +234,7 @@ impl Server {
         info!("listening on {}", endpoint.local_addr()?);
         let mut check_neighbor_interval =
             tokio::time::interval(Duration::from_secs(*check_neighbor_interval));
-
+        check_neighbor_interval.tick().await;
         loop {
             select! {
                 Some(connecting) = endpoint.accept() => {
@@ -213,7 +246,7 @@ impl Server {
         }
     }
 
-    async fn join(self, connection: Connection) -> Result<()> {
+    async fn join(self, connection: Connection, locator: String) -> Result<()> {
         let Config {
             msg_timeout,
             subscription_list,
@@ -221,8 +254,10 @@ impl Server {
         } = config();
         let remote_address = connection.remote_address();
         let mut msg_timeout = tokio::time::interval(Duration::from_secs(*msg_timeout));
+        msg_timeout.tick().await;
         select! {
             _ = msg_timeout.tick() => {
+                debug!("join request timeout: {remote_address}");
                 Err(eyre!("join request timeout: {remote_address}"))
             }
             Ok((mut tx, mut rv)) = connection.open_bi() => {
@@ -245,23 +280,29 @@ impl Server {
 
                     let neighbor = Arc::new(Neighbor {
                         id: origin.into(),
+                        locator: Arc::new(Mutex::new(locator.clone())),
                         connection,
                         server: self.clone(),
                         send: Arc::new(Mutex::new(tx)),
                         recv: Arc::new(Mutex::new(rv)),
                     });
-
-                    let neighbor_ = neighbor.clone();
-                    tokio::spawn(async move {
-                        neighbor_.handle().await;
-                    });
-
-                    info!("new neighbor({}): {remote_address}", origin);
-
-                    self.neighbors.write().await.insert(neighbor.id, neighbor);
+                    let old_neighbor = self.neighbors.read().await.get(&neighbor.id).cloned();
+                    if let Some(old_neighbor) = old_neighbor {
+                        old_neighbor.set_locator(locator.clone()).await;
+                        info!("update neighbor({}): {remote_address}", origin);
+                    } else {
+                        let neighbor_ = neighbor.clone();
+                        tokio::spawn(async move {
+                            neighbor_.handle().await;
+                        });
+                        info!("new neighbor({}): {remote_address}", origin);
+                        self.neighbors.write().await.insert(neighbor.id, neighbor);
+                    }
+                    self.connect_neighbors.write().await.insert(locator, origin);
 
                     Ok(())
                 } else {
+                    debug!("invalid join response: {remote_address}");
                     Err(eyre!("invalid join response: {remote_address}"))
                 }
             }
@@ -269,82 +310,92 @@ impl Server {
     }
 
     async fn handle_join_request(self, connecting: Connecting) -> Result<()> {
-        let Config {
-            msg_timeout, id, ..
-        } = config();
+        let Config { id, .. } = config();
         match connecting.await {
             Ok(connection) => {
                 let remote_address = connection.remote_address();
-                let mut msg_timeout = tokio::time::interval(Duration::from_secs(*msg_timeout));
-                select! {
-                    _ = msg_timeout.tick() => {
-                        Err(eyre!("join request timeout: {remote_address}"))
-                    }
-                    Ok((mut tx, mut rv)) = connection.accept_bi() => {
-                        let msg = read_msg(&mut rv).await?;
+                if let Ok((mut tx, mut rv)) = connection.accept_bi().await {
+                    let msg = read_msg(&mut rv).await?;
 
-                        if let Message::EldegossMsg(EldegossMsg {
-                            origin,
-                            body: EldegossMsgBody::JoinReq(subscription_list),
-                            ..
-                        }) = msg
-                        {
-                            if self.membership.read().await.contains(&origin.into()) {
-                                return Err(eyre!("already joined: {}", origin));
-                            }
-
-                            let mut neighbor_list = HashSet::new();
-                            neighbor_list.insert((*id).into());
-                            let member = Member {
-                                id: origin.into(),
-                                subscription_list: HashSet::from_iter(subscription_list),
-                                neighbor_list,
-                            };
-                            self.membership.write().await.add_member(member.clone());
-
-                            self.send_msg(
-                                Message::eldegoss(
-                                    0,
-                                    EldegossMsgBody::AddMember(member)
-                                ),
-                            ).await;
-
+                    if let Message::EldegossMsg(EldegossMsg {
+                        origin,
+                        body: EldegossMsgBody::JoinReq(subscription_list),
+                        ..
+                    }) = msg
+                    {
+                        if self.neighbors.read().await.contains_key(&origin.into()) {
+                            info!("neighbor({origin}) already exists: {remote_address}");
                             let membership = self.membership.read().await.clone();
-                            debug!("memberlist: {:#?}", membership);
-
                             let _ = write_msg(
                                 &mut tx,
-                                Message::eldegoss(
-                                    0,
-                                    EldegossMsgBody::JoinRsp(membership),
-                                ),
+                                Message::eldegoss(0, EldegossMsgBody::JoinRsp(membership)),
                             )
                             .await;
-
                             let neighbor = Arc::new(Neighbor {
-                                id: origin.into(),
+                                id: EldegossId::rand(),
+                                locator: Arc::new(Mutex::new("".to_string())),
                                 connection,
                                 server: self.clone(),
                                 send: Arc::new(Mutex::new(tx)),
                                 recv: Arc::new(Mutex::new(rv)),
                             });
 
-                            let neighbor_ = neighbor.clone();
-                            tokio::spawn(async move {
-                                neighbor_.handle().await;
-                            });
-                            info!("new neighbor({}): {remote_address}", origin);
-
                             self.neighbors.write().await.insert(neighbor.id, neighbor);
-
-                            Ok(())
-                        } else {
-                            Err(eyre!("invalid join response: {remote_address}"))
+                            return Ok(());
                         }
+
+                        let mut neighbor_list = HashSet::new();
+                        neighbor_list.insert((*id).into());
+                        let member = Member {
+                            id: origin.into(),
+                            subscription_list: HashSet::from_iter(subscription_list),
+                            neighbor_list,
+                        };
+                        self.membership.write().await.add_member(member.clone());
+
+                        self.send_msg(Message::eldegoss(0, EldegossMsgBody::AddMember(member)))
+                            .await;
+
+                        let membership = self.membership.read().await.clone();
+                        debug!("memberlist: {membership:#?}");
+
+                        let _ = write_msg(
+                            &mut tx,
+                            Message::eldegoss(0, EldegossMsgBody::JoinRsp(membership)),
+                        )
+                        .await;
+
+                        let neighbor = Arc::new(Neighbor {
+                            id: origin.into(),
+                            locator: Arc::new(Mutex::new(remote_address.to_string())),
+                            connection,
+                            server: self.clone(),
+                            send: Arc::new(Mutex::new(tx)),
+                            recv: Arc::new(Mutex::new(rv)),
+                        });
+
+                        let neighbor_ = neighbor.clone();
+                        tokio::spawn(async move {
+                            neighbor_.handle().await;
+                        });
+                        info!("new neighbor({origin}): {remote_address}");
+
+                        self.neighbors.write().await.insert(neighbor.id, neighbor);
+
+                        Ok(())
+                    } else {
+                        debug!("invalid join response: {remote_address}");
+                        Err(eyre!("invalid join response: {remote_address}"))
                     }
+                } else {
+                    debug!("accept_bi failed: {remote_address}");
+                    Err(eyre!("accept_bi failed: {remote_address}"))
                 }
             }
-            Err(e) => Err(eyre!("connecting failed: {:?}", e)),
+            Err(e) => {
+                debug!("connecting failed: {e:?}");
+                Err(eyre!("connecting failed: {e:?}"))
+            }
         }
     }
 
@@ -573,8 +624,7 @@ impl Server {
         {
             self.neighbors.read().await.values().for_each(|neighbor| {
                 if let Some(reason) = neighbor.connection.close_reason() {
-                    info!("neighbor({}) closed: {}", neighbor.id, reason);
-                    remove_ids.push(neighbor.id);
+                    remove_ids.push((neighbor.id, neighbor.locator.clone(), reason));
                 }
             });
         }
@@ -582,9 +632,20 @@ impl Server {
         {
             let mut neighbors = self.neighbors.write().await;
             let mut membership = self.membership.write().await;
-            for remove_id in remove_ids {
+            let mut connect_neighbors = self.connect_neighbors.write().await;
+            for (remove_id, locator, reason) in remove_ids {
+                let locator = locator.lock().await;
+                connect_neighbors.remove(locator.as_str());
                 neighbors.remove(&remove_id);
-                membership.add_check_member(remove_id);
+                membership.add_check_member(remove_id, !locator.is_empty());
+
+                info!(
+                    "neighbor({}) [{}] |{}| closed: {}",
+                    remove_id,
+                    locator,
+                    !locator.is_empty(),
+                    reason
+                );
             }
         }
     }

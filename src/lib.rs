@@ -202,11 +202,13 @@ impl Membership {
         debug!("after remove: {:#?}", self.member_map);
     }
 
-    pub fn add_check_member(&mut self, id: EldegossId) {
+    pub fn add_check_member(&mut self, id: EldegossId, need_check: bool) {
         if let Some(self_member) = self.member_map.get_mut(&config().id.into()) {
             self_member.remove_neighbor(id);
         }
-        self.check_member_list.push(id);
+        if need_check {
+            self.check_member_list.push(id);
+        }
     }
 
     pub fn get_check_member(&mut self) -> Option<EldegossId> {
