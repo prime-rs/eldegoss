@@ -96,8 +96,8 @@ impl Default for Config {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Member {
-    pub id: EldegossId,
-    pub meta_data: Vec<u8>,
+    id: EldegossId,
+    meta_data: Vec<u8>,
 }
 
 impl Hash for Member {

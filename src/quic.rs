@@ -57,13 +57,13 @@ pub async fn write_msg(send: &mut SendStream, mut msg: Message) -> Result<()> {
 }
 
 #[derive(Debug)]
-pub struct Neighbor {
-    pub id: EldegossId,
-    pub locator: Arc<Mutex<String>>,
-    pub connection: Connection,
-    pub send: Arc<Mutex<quinn::SendStream>>,
-    pub recv: Arc<Mutex<quinn::RecvStream>>,
-    pub server: Server,
+struct Neighbor {
+    id: EldegossId,
+    locator: Arc<Mutex<String>>,
+    connection: Connection,
+    send: Arc<Mutex<quinn::SendStream>>,
+    recv: Arc<Mutex<quinn::RecvStream>>,
+    server: Server,
 }
 
 impl Neighbor {
@@ -105,12 +105,12 @@ type MsgForRecv = (Sender<Message>, Receiver<Message>);
 
 #[derive(Debug, Clone)]
 pub struct Server {
-    pub msg_for_recv: MsgForRecv,
-    pub neighbors: Arc<RwLock<HashMap<EldegossId, Arc<Neighbor>>>>,
-    pub membership: Arc<RwLock<Membership>>,
-    pub connect_neighbors: Arc<RwLock<HashMap<String, u128>>>,
-    pub check_member_list: Arc<RwLock<Vec<EldegossId>>>,
-    pub wait_for_remove_member_list: Arc<RwLock<Vec<EldegossId>>>,
+    msg_for_recv: MsgForRecv,
+    neighbors: Arc<RwLock<HashMap<EldegossId, Arc<Neighbor>>>>,
+    membership: Arc<RwLock<Membership>>,
+    connect_neighbors: Arc<RwLock<HashMap<String, u128>>>,
+    check_member_list: Arc<RwLock<Vec<EldegossId>>>,
+    wait_for_remove_member_list: Arc<RwLock<Vec<EldegossId>>>,
 }
 
 impl Server {
