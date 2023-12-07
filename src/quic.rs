@@ -143,7 +143,14 @@ impl Server {
     // TODO: 异步加速
     pub async fn send_msg(&self, mut msg: Message) {
         msg.set_origin(config().id);
-        self.dispatch(msg, 0).await
+
+        if msg.to() != 0 {
+            if let Some(neighbor) = self.neighbors.read().await.get(&msg.to().into()) {
+                neighbor.send_msg(&msg).await;
+                return;
+            }
+        }
+        self.gossip_msg(&msg, 0).await;
     }
 
     async fn to_recv_msg(&self, msg: Message) {
@@ -398,28 +405,23 @@ impl Server {
         self.neighbors.write().await.insert(neighbor.id, neighbor);
     }
 
-    // TODO: 按接收与发送拆分函数, 区分参数格式
     async fn dispatch(&self, msg: Message, received_from: u128) {
         // debug!("dispatch({received_from}) msg: {:?}", msg);
         match (msg.to(), msg.topic().as_str()) {
             (0, "") => {
                 self.gossip_msg(&msg, received_from).await;
-                if received_from != 0 {
-                    self.handle_recv_msg(msg).await;
-                }
+                self.handle_recv_msg(msg).await;
             }
             (0, topic) => {
                 self.gossip_msg(&msg, received_from).await;
 
-                if received_from != 0 && config().subscription_list.contains(&topic.to_owned()) {
+                if config().subscription_list.contains(&topic.to_owned()) {
                     self.to_recv_msg(msg).await;
                 }
             }
             (to, "") => {
                 if to == config().id {
-                    if received_from != 0 {
-                        self.handle_recv_msg(msg).await;
-                    }
+                    self.handle_recv_msg(msg).await;
                 } else if let Some(neighbor) = self.neighbors.read().await.get(&to.into()) {
                     neighbor.send_msg(&msg).await;
                 } else {
@@ -428,8 +430,7 @@ impl Server {
             }
             (to, topic) => {
                 if to == config().id {
-                    if received_from != 0 && config().subscription_list.contains(&topic.to_owned())
-                    {
+                    if config().subscription_list.contains(&topic.to_owned()) {
                         self.to_recv_msg(msg).await;
                     }
                 } else {
@@ -464,9 +465,8 @@ impl Server {
                         .await
                         .contains_key(&(*check_id).into());
                 debug!("check member: {} result: {}", check_id, result);
-                let mut msg = Message::eldegoss(0, EldegossMsgBody::CheckRsp(*check_id, result));
-                msg.set_origin(config().id);
-                self.gossip_msg(&msg, 0).await;
+                let msg = Message::eldegoss(0, EldegossMsgBody::CheckRsp(*check_id, result));
+                self.send_msg(msg).await;
             }
             Message::EldegossMsg(EldegossMsg {
                 body: EldegossMsgBody::CheckRsp(id, result),

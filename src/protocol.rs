@@ -77,6 +77,24 @@ impl Message {
         })
     }
 
+    pub fn to_msg(to: u128, body: Vec<u8>) -> Self {
+        Self::Msg(Msg {
+            origin: 0,
+            to,
+            topic: Default::default(),
+            body,
+        })
+    }
+
+    pub fn pub_msg(topic: String, body: Vec<u8>) -> Self {
+        Self::Msg(Msg {
+            origin: 0,
+            to: 0,
+            topic,
+            body,
+        })
+    }
+
     pub const fn origin(&self) -> u128 {
         match self {
             Message::EldegossMsg(msg) => msg.origin,
