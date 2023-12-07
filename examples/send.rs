@@ -19,7 +19,7 @@ async fn main() {
 
     let server = Server::serve(config).await;
 
-    let mut stats = eldegoss::util::Stats::new(1000);
+    let mut stats = eldegoss::util::Stats::new(10000);
     loop {
         let msg = Message::msg(1, "topic".to_owned(), vec![0; 1024]);
         server.send_msg(msg).await;

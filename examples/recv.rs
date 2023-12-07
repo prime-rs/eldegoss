@@ -18,7 +18,7 @@ async fn main() {
 
     let server = Server::serve(config).await;
 
-    let mut stats = eldegoss::util::Stats::new(1000);
+    let mut stats = eldegoss::util::Stats::new(10000);
     while server.recv_msg().await.is_ok() {
         stats.increment();
     }

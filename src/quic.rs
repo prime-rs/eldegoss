@@ -76,7 +76,10 @@ impl Neighbor {
             loop {
                 match read_msg(&mut recv).await {
                     Ok(msg) => {
-                        server.dispatch(msg, id).await;
+                        let server = server.clone();
+                        tokio::spawn(async move {
+                            server.dispatch(msg, id).await;
+                        });
                     }
                     Err(e) => {
                         debug!("neighbor handle recv msg failed: {e}");
