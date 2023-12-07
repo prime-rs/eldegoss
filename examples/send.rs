@@ -7,7 +7,7 @@ async fn main() {
 
     let config = Config {
         id: 2,
-        connect: ["127.0.0.1:4721".to_string()].to_vec(),
+        // connect: ["127.0.0.1:4721".to_string()].to_vec(),
         listen: "[::]:4722".to_string(),
         cert_path: "./config/cert/client_cert.pem".into(),
         private_key_path: "./config/cert/client_key.pem".into(),
@@ -21,10 +21,15 @@ async fn main() {
 
     let mut stats = eldegoss::util::Stats::new(10000);
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+    let mut count = 0;
     loop {
         interval.tick().await;
-        let msg = Message::to_msg(3, vec![0; 1024]);
+        let msg = Message::pub_msg("topic".to_string(), vec![count]);
         server.send_msg(msg).await;
         stats.increment();
+        count += 1;
+        if count == 100 {
+            count = 0;
+        }
     }
 }

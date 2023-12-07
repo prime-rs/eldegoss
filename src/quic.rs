@@ -166,6 +166,7 @@ impl Server {
             ca_path,
             connect,
             keep_alive_interval,
+            check_neighbor_interval,
             ..
         } = &config();
 
@@ -191,8 +192,7 @@ impl Server {
         let server = self.clone();
         tokio::spawn(async move {
             let Config { connect, .. } = &config();
-            let mut interval =
-                tokio::time::interval(Duration::from_secs(config().keep_alive_interval));
+            let mut interval = tokio::time::interval(Duration::from_secs(*check_neighbor_interval));
             interval.tick().await;
             loop {
                 interval.tick().await;

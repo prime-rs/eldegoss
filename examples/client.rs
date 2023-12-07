@@ -6,9 +6,8 @@ async fn main() {
     common_x::log::init_log_filter("debug,quinn_udp=info");
 
     let config = Config {
-        id: 3,
         connect: ["127.0.0.1:4722".to_string()].to_vec(),
-        listen: "[::]:4723".to_string(),
+        listen: "[::]:0".to_string(),
         cert_path: "./config/cert/client_cert.pem".into(),
         private_key_path: "./config/cert/client_key.pem".into(),
         ca_path: "./config/cert/ca_cert.pem".into(),
@@ -21,7 +20,7 @@ async fn main() {
 
     let mut stats = eldegoss::util::Stats::new(1000);
     while let Ok(msg) = server.recv_msg().await {
-        info!("recv msg: {} - {}", msg.origin(), msg.topic());
+        info!("recv msg: {msg:?}");
         stats.increment();
     }
 }

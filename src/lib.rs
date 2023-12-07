@@ -70,7 +70,6 @@ pub struct Config {
     pub keep_alive_interval: u64,
     pub check_neighbor_interval: u64,
     pub msg_timeout: u64,
-    pub msg_max_size: usize,
 
     pub gossip_fanout: usize,
 }
@@ -86,10 +85,9 @@ impl Default for Config {
             private_key_path: Default::default(),
             subscription_list: Default::default(),
             keep_alive_interval: 5,
-            check_neighbor_interval: 3,
+            check_neighbor_interval: 1,
             msg_timeout: 2,
-            msg_max_size: 1024 * 1024 * 16,
-            gossip_fanout: 2,
+            gossip_fanout: 3,
         }
     }
 }
