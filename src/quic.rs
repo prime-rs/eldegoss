@@ -143,7 +143,6 @@ impl Server {
         Ok(self.msg_for_recv.1.recv_async().await?)
     }
 
-    // TODO: 异步加速
     pub async fn send_msg(&self, mut msg: Message) {
         msg.set_origin(config().id);
 

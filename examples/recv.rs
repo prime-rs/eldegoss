@@ -7,6 +7,7 @@ async fn main() {
 
     let config = Config {
         id: 1,
+        connect: ["127.0.0.1:4723".to_string()].to_vec(),
         listen: "[::]:4721".to_string(),
         cert_path: "./config/cert/server_cert.pem".into(),
         private_key_path: "./config/cert/server_key.pem".into(),
@@ -19,7 +20,8 @@ async fn main() {
     let server = Server::serve(config).await;
 
     let mut stats = eldegoss::util::Stats::new(10000);
-    while server.recv_msg().await.is_ok() {
+    while let Ok(msg) = server.recv_msg().await {
+        info!("recv msg: {} - {}", msg.origin(), msg.topic());
         stats.increment();
     }
 }

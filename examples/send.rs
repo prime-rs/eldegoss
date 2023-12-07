@@ -20,8 +20,10 @@ async fn main() {
     let server = Server::serve(config).await;
 
     let mut stats = eldegoss::util::Stats::new(10000);
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
     loop {
-        let msg = Message::msg(1, "topic".to_owned(), vec![0; 1024]);
+        interval.tick().await;
+        let msg = Message::to_msg(3, vec![0; 1024]);
         server.send_msg(msg).await;
         stats.increment();
     }
