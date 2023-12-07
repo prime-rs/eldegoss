@@ -40,7 +40,7 @@ impl FromStr for Flags {
 pub enum EldegossMsgBody {
     AddMember(Member),
     RemoveMember(u128),
-    JoinReq(Vec<String>),
+    JoinReq(Vec<u8>),
     JoinRsp(Membership),
     CheckReq(u128),
     CheckRsp(u128, bool),
@@ -241,11 +241,7 @@ fn test_encode_decode_msg() {
     let msg = Message::EldegossMsg(EldegossMsg {
         origin: 1,
         to: 3,
-        body: EldegossMsgBody::AddMember(Member {
-            id: 1.into(),
-            neighbor_list: std::collections::HashSet::new(),
-            subscription_list: std::collections::HashSet::new(),
-        }),
+        body: EldegossMsgBody::AddMember(Member::new(1.into(), vec![])),
     });
     let buf = encode_msg(&msg);
     println!("buf is {:?}", buf);

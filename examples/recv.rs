@@ -1,7 +1,7 @@
 use eldegoss::{quic::Server, Config};
 use tracing::info;
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 30)]
+#[tokio::main(flavor = "multi_thread", worker_threads = 29)]
 async fn main() {
     common_x::log::init_log_filter("debug,quinn_udp=info");
 
