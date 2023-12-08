@@ -87,9 +87,9 @@ impl Neighbor {
                     Err(e) => {
                         debug!("neighbor handle recv msg failed: {e}");
                         if let Some(close_reason) = connection.close_reason() {
-                            server.connect_neighbors.write().await.remove(&locator);
+                            server.connect_neighbors.lock().await.remove(&locator);
                             server.neighbors.write().await.remove(&id.into());
-                            server.check_member_list.write().await.push(id.into());
+                            server.check_member_list.lock().await.push(id.into());
                             info!("neighbor({id}) closed: {close_reason}");
                         }
                         break;
@@ -120,10 +120,10 @@ type MsgForRecv = (Sender<Message>, Receiver<Message>);
 pub struct Server {
     msg_for_recv: MsgForRecv,
     neighbors: Arc<RwLock<HashMap<EldegossId, Neighbor>>>,
-    membership: Arc<RwLock<Membership>>,
-    connect_neighbors: Arc<RwLock<HashMap<String, u128>>>,
-    check_member_list: Arc<RwLock<Vec<EldegossId>>>,
-    wait_for_remove_member_list: Arc<RwLock<Vec<EldegossId>>>,
+    membership: Arc<Mutex<Membership>>,
+    connect_neighbors: Arc<Mutex<HashMap<String, u128>>>,
+    check_member_list: Arc<Mutex<Vec<EldegossId>>>,
+    wait_for_remove_member_list: Arc<Mutex<Vec<EldegossId>>>,
 }
 
 impl Server {
@@ -135,7 +135,7 @@ impl Server {
         Self {
             msg_for_recv: flume::unbounded(),
             neighbors: Default::default(),
-            membership: Arc::new(RwLock::new(membership)),
+            membership: Arc::new(Mutex::new(membership)),
             connect_neighbors: Default::default(),
             check_member_list: Default::default(),
             wait_for_remove_member_list: Default::default(),
@@ -187,7 +187,7 @@ impl Server {
         client_config.transport_config(Arc::new(transport_config));
 
         for conn in connect {
-            if self.connect_neighbors.read().await.contains_key(conn) {
+            if self.connect_neighbors.lock().await.contains_key(conn) {
                 continue;
             }
             let _ = self.connect_to(&client_config, conn.to_string());
@@ -201,7 +201,7 @@ impl Server {
             loop {
                 interval.tick().await;
                 for conn in connect {
-                    if server.connect_neighbors.read().await.contains_key(conn) {
+                    if server.connect_neighbors.lock().await.contains_key(conn) {
                         continue;
                     }
                     info!("reconnect to: {conn}");
@@ -292,7 +292,7 @@ impl Server {
                 }) = msg
                 {
                     {
-                        self.membership.write().await.merge(&membership);
+                        self.membership.lock().await.merge(&membership);
                     }
 
                     let neighbor = Neighbor {
@@ -307,7 +307,7 @@ impl Server {
                     if let Some(old_neighbor) = self.neighbors.write().await.get_mut(&neighbor.id) {
                         old_neighbor.set_locator(locator.clone());
                         info!("update neighbor({}): {remote_address}", origin);
-                        self.connect_neighbors.write().await.insert(locator.clone(), origin);
+                        self.connect_neighbors.lock().await.insert(locator.clone(), origin);
                         is_old = true;
                     }
                     if !is_old {
@@ -357,7 +357,7 @@ impl Server {
                             ));
                         }
 
-                        let membership = self.membership.read().await.clone();
+                        let membership = self.membership.lock().await.clone();
                         debug!("memberlist: {membership:#?}");
 
                         let _ = write_msg(
@@ -368,7 +368,7 @@ impl Server {
 
                         let member = Member::new(origin.into(), meta_data);
                         {
-                            self.membership.write().await.add_member(member.clone());
+                            self.membership.lock().await.add_member(member.clone());
                         }
 
                         self.send_msg(Message::eldegoss(0, EldegossMsgBody::AddMember(member)))
@@ -408,15 +408,15 @@ impl Server {
     async fn insert_neighbor(&self, locator: String, neighbor: Neighbor) {
         let id = neighbor.id.to_u128();
         self.wait_for_remove_member_list
-            .write()
+            .lock()
             .await
             .retain(|x| x.to_u128() != id);
         self.check_member_list
-            .write()
+            .lock()
             .await
             .retain(|x| x.to_u128() != id);
 
-        self.connect_neighbors.write().await.insert(locator, id);
+        self.connect_neighbors.lock().await.insert(locator, id);
         self.neighbors.write().await.insert(neighbor.id, neighbor);
     }
 
@@ -461,13 +461,13 @@ impl Server {
                 body: EldegossMsgBody::AddMember(member),
                 ..
             }) => {
-                self.membership.write().await.add_member(member.clone());
+                self.membership.lock().await.add_member(member.clone());
             }
             Message::EldegossMsg(EldegossMsg {
                 body: EldegossMsgBody::RemoveMember(id),
                 ..
             }) => {
-                self.membership.write().await.remove_member((*id).into());
+                self.membership.lock().await.remove_member((*id).into());
             }
             Message::EldegossMsg(EldegossMsg {
                 body: EldegossMsgBody::CheckReq(check_id),
@@ -490,7 +490,7 @@ impl Server {
                 debug!("recv check member: {} result: {}", id, result);
                 if *result {
                     self.wait_for_remove_member_list
-                        .write()
+                        .lock()
                         .await
                         .retain(|id_| &id_.to_u128() != id);
                 }
@@ -539,9 +539,9 @@ impl Server {
         {
             let mut remove_ids = vec![];
             {
-                while let Some(remove_id) = self.wait_for_remove_member_list.write().await.pop() {
+                while let Some(remove_id) = self.wait_for_remove_member_list.lock().await.pop() {
                     info!("remove member: {}", remove_id);
-                    self.membership.write().await.remove_member(remove_id);
+                    self.membership.lock().await.remove_member(remove_id);
                     remove_ids.push(remove_id);
                 }
             }
@@ -558,8 +558,8 @@ impl Server {
         // check member
         {
             loop {
-                let check_id = if let Some(id) = self.check_member_list.write().await.pop() {
-                    self.wait_for_remove_member_list.write().await.push(id);
+                let check_id = if let Some(id) = self.check_member_list.lock().await.pop() {
+                    self.wait_for_remove_member_list.lock().await.push(id);
                     Some(id)
                 } else {
                     None
