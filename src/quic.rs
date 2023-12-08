@@ -60,7 +60,7 @@ pub async fn write_msg(send: &mut SendStream, mut msg: Message) -> Result<()> {
 #[derive(Debug)]
 struct Neighbor {
     id: EldegossId,
-    locator: Arc<Mutex<String>>,
+    locator: String,
     connection: Connection,
     send: Arc<Mutex<quinn::SendStream>>,
     recv: Arc<Mutex<quinn::RecvStream>>,
@@ -87,15 +87,10 @@ impl Neighbor {
                     Err(e) => {
                         debug!("neighbor handle recv msg failed: {e}");
                         if let Some(close_reason) = connection.close_reason() {
-                            let locator = locator.lock().await;
-                            server
-                                .connect_neighbors
-                                .write()
-                                .await
-                                .remove(locator.as_str());
+                            server.connect_neighbors.write().await.remove(&locator);
                             server.neighbors.write().await.remove(&id.into());
                             server.check_member_list.write().await.push(id.into());
-                            info!("neighbor({id}) [{locator}] closed: {close_reason}");
+                            info!("neighbor({id}) closed: {close_reason}");
                         }
                         break;
                     }
@@ -114,8 +109,8 @@ impl Neighbor {
         Ok(())
     }
 
-    pub async fn set_locator(&self, locator: String) {
-        *self.locator.lock().await = locator;
+    pub fn set_locator(&mut self, locator: String) {
+        self.locator = locator;
     }
 }
 
@@ -302,15 +297,15 @@ impl Server {
 
                     let neighbor = Neighbor {
                         id: origin.into(),
-                        locator: Arc::new(Mutex::new(locator.clone())),
+                        locator: locator.clone(),
                         connection,
                         server: self.clone(),
                         send: Arc::new(Mutex::new(tx)),
                         recv: Arc::new(Mutex::new(rv)),
                     };
                     let mut is_old = false;
-                    if let Some(old_neighbor) = self.neighbors.read().await.get(&neighbor.id) {
-                        old_neighbor.set_locator(locator.clone()).await;
+                    if let Some(old_neighbor) = self.neighbors.write().await.get_mut(&neighbor.id) {
+                        old_neighbor.set_locator(locator.clone());
                         info!("update neighbor({}): {remote_address}", origin);
                         self.connect_neighbors.write().await.insert(locator.clone(), origin);
                         is_old = true;
@@ -381,7 +376,7 @@ impl Server {
 
                         let neighbor = Neighbor {
                             id: origin.into(),
-                            locator: Arc::new(Mutex::new(remote_address.to_string())),
+                            locator: remote_address.to_string(),
                             connection,
                             server: self.clone(),
                             send: Arc::new(Mutex::new(tx)),
