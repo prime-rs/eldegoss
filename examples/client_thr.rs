@@ -1,11 +1,9 @@
-use common_x::signal::shutdown_signal;
 use eldegoss::{quic::Server, Config};
-use tokio::select;
 use tracing::info;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 30)]
 async fn main() {
-    common_x::log::init_log_filter("debug,quinn_udp=info");
+    common_x::log::init_log_filter("info");
 
     let config = Config {
         connect: ["127.0.0.1:4722".to_string()].to_vec(),
@@ -22,15 +20,7 @@ async fn main() {
 
     let mut stats = eldegoss::util::Stats::new(1000);
     loop {
-        select! {
-            Ok(msg) = server.recv_msg() => {
-                info!("recv msg: {} - {}", msg.origin(), msg.topic());
-                stats.increment();
-            }
-            _ = shutdown_signal() => {
-                info!("shutdown");
-                break;
-            }
-        }
+        let _ = server.recv_msg().await;
+        stats.increment();
     }
 }

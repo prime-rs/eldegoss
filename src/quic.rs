@@ -13,7 +13,7 @@ use quinn::{
     TransportConfig,
 };
 
-use common_x::cert::{read_ca, read_certs, read_key, WebPkiVerifierAnyServerName};
+use common_x::cert::{create_any_server_name_config, read_certs, read_key};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use tokio::select;
@@ -56,6 +56,7 @@ pub async fn write_msg(send: &mut SendStream, mut msg: Message) -> Result<()> {
     Ok(())
 }
 
+// TODO: optim shutdown, reconnect, check
 #[derive(Debug)]
 struct Neighbor {
     id: EldegossId,
@@ -68,9 +69,11 @@ struct Neighbor {
 
 impl Neighbor {
     fn handle(&self) {
-        let server = self.server.clone();
         let id = self.id.to_u128();
         let recv = self.recv.clone();
+        let connection = self.connection.clone();
+        let locator = self.locator.clone();
+        let server = self.server.clone();
         tokio::spawn(async move {
             let mut recv = recv.lock().await;
             loop {
@@ -83,6 +86,17 @@ impl Neighbor {
                     }
                     Err(e) => {
                         debug!("neighbor handle recv msg failed: {e}");
+                        if let Some(close_reason) = connection.close_reason() {
+                            let locator = locator.lock().await;
+                            server
+                                .connect_neighbors
+                                .write()
+                                .await
+                                .remove(locator.as_str());
+                            server.neighbors.write().await.remove(&id.into());
+                            server.check_member_list.write().await.push(id.into());
+                            info!("neighbor({id}) [{locator}] closed: {close_reason}");
+                        }
                         break;
                     }
                 }
@@ -90,13 +104,14 @@ impl Neighbor {
         });
     }
 
-    pub async fn send_msg(&self, msg: &Message) {
-        let mut msg_bytes = encode_msg(msg);
-        let mut bytes = (msg_bytes.len() as u32).to_le_bytes().to_vec();
-        bytes.append(&mut msg_bytes);
-        if let Err(e) = self.send.lock().await.write_all(&bytes).await {
-            debug!("neighbor({}) send msg failed: {e:?}", self.id);
-        }
+    pub async fn send_msg(&self, msg: &Message) -> Result<()> {
+        let msg_bytes = encode_msg(msg);
+        let len = msg_bytes.len() as u32;
+        let len_bytes = len.to_le_bytes().to_vec();
+        let mut send = self.send.lock().await;
+        send.write_all(&len_bytes).await?;
+        send.write_all(&msg_bytes).await?;
+        Ok(())
     }
 
     pub async fn set_locator(&self, locator: String) {
@@ -109,7 +124,7 @@ type MsgForRecv = (Sender<Message>, Receiver<Message>);
 #[derive(Debug, Clone)]
 pub struct Server {
     msg_for_recv: MsgForRecv,
-    neighbors: Arc<RwLock<HashMap<EldegossId, Arc<Neighbor>>>>,
+    neighbors: Arc<RwLock<HashMap<EldegossId, Neighbor>>>,
     membership: Arc<RwLock<Membership>>,
     connect_neighbors: Arc<RwLock<HashMap<String, u128>>>,
     check_member_list: Arc<RwLock<Vec<EldegossId>>>,
@@ -145,10 +160,9 @@ impl Server {
 
     pub async fn send_msg(&self, mut msg: Message) {
         msg.set_origin(config().id);
-
         if msg.to() != 0 {
             if let Some(neighbor) = self.neighbors.read().await.get(&msg.to().into()) {
-                neighbor.send_msg(&msg).await;
+                let _ = neighbor.send_msg(&msg).await;
                 return;
             }
         }
@@ -170,12 +184,7 @@ impl Server {
             ..
         } = &config();
 
-        let client_crypto = rustls::ClientConfig::builder()
-            .with_safe_defaults()
-            .with_custom_certificate_verifier(Arc::new(WebPkiVerifierAnyServerName::new(read_ca(
-                &ca_path.into(),
-            )?)))
-            .with_no_client_auth();
+        let client_crypto = create_any_server_name_config(ca_path)?;
 
         let mut client_config = ClientConfig::new(Arc::new(client_crypto));
         let mut transport_config = TransportConfig::default();
@@ -291,20 +300,22 @@ impl Server {
                         self.membership.write().await.merge(&membership);
                     }
 
-                    let neighbor = Arc::new(Neighbor {
+                    let neighbor = Neighbor {
                         id: origin.into(),
                         locator: Arc::new(Mutex::new(locator.clone())),
                         connection,
                         server: self.clone(),
                         send: Arc::new(Mutex::new(tx)),
                         recv: Arc::new(Mutex::new(rv)),
-                    });
-                    let old_neighbor = self.neighbors.read().await.get(&neighbor.id).cloned();
-                    if let Some(old_neighbor) = old_neighbor {
+                    };
+                    let mut is_old = false;
+                    if let Some(old_neighbor) = self.neighbors.read().await.get(&neighbor.id) {
                         old_neighbor.set_locator(locator.clone()).await;
                         info!("update neighbor({}): {remote_address}", origin);
-                        self.connect_neighbors.write().await.insert(locator, origin);
-                    } else {
+                        self.connect_neighbors.write().await.insert(locator.clone(), origin);
+                        is_old = true;
+                    }
+                    if !is_old {
                         neighbor.handle();
                         info!("new neighbor({}): {remote_address}", origin);
                         self.insert_neighbor(locator, neighbor).await;
@@ -332,10 +343,17 @@ impl Server {
                         ..
                     }) = msg
                     {
-                        let neighbor = self.neighbors.read().await.get(&origin.into()).cloned();
-                        let is_new = neighbor.is_none();
-                        let is_reconnect =
-                            neighbor.map_or(false, |n| n.connection.close_reason().is_some());
+                        let mut is_reconnect = false;
+                        let is_new = if let Some(neighbor) =
+                            self.neighbors.read().await.get(&origin.into())
+                        {
+                            if neighbor.connection.close_reason().is_some() {
+                                is_reconnect = true;
+                            }
+                            false
+                        } else {
+                            true
+                        };
 
                         if !is_new && !is_reconnect {
                             info!("neighbor({origin}) already exists: {remote_address}");
@@ -361,14 +379,14 @@ impl Server {
                         self.send_msg(Message::eldegoss(0, EldegossMsgBody::AddMember(member)))
                             .await;
 
-                        let neighbor = Arc::new(Neighbor {
+                        let neighbor = Neighbor {
                             id: origin.into(),
                             locator: Arc::new(Mutex::new(remote_address.to_string())),
                             connection,
                             server: self.clone(),
                             send: Arc::new(Mutex::new(tx)),
                             recv: Arc::new(Mutex::new(rv)),
-                        });
+                        };
                         neighbor.handle();
                         info!("new neighbor({origin}): {remote_address}");
 
@@ -392,7 +410,7 @@ impl Server {
         }
     }
 
-    async fn insert_neighbor(&self, locator: String, neighbor: Arc<Neighbor>) {
+    async fn insert_neighbor(&self, locator: String, neighbor: Neighbor) {
         let id = neighbor.id.to_u128();
         self.wait_for_remove_member_list
             .write()
@@ -425,7 +443,7 @@ impl Server {
                 if to == config().id {
                     self.handle_recv_msg(msg).await;
                 } else if let Some(neighbor) = self.neighbors.read().await.get(&to.into()) {
-                    neighbor.send_msg(&msg).await;
+                    let _ = neighbor.send_msg(&msg).await;
                 } else {
                     self.gossip_msg(&msg, received_from).await;
                 }
@@ -496,28 +514,27 @@ impl Server {
             for (_, neighbor) in self.neighbors.read().await.iter() {
                 let neighbor_id = neighbor.id.to_u128();
                 if neighbor_id != msg.origin() && neighbor_id != received_from {
-                    neighbor.send_msg(msg).await;
+                    let _ = neighbor.send_msg(msg).await;
                 }
             }
         } else {
-            let neighbors = self
+            let neighbor_ids = self
                 .neighbors
                 .read()
                 .await
-                .iter()
-                .filter_map(|(id, neighbor)| {
-                    let id = id.to_u128();
-                    if id != msg.origin() && id != received_from {
-                        Some(neighbor)
-                    } else {
-                        None
-                    }
+                .keys()
+                .filter(|eid| {
+                    let id = eid.to_u128();
+                    id != msg.origin() && id != received_from
                 })
                 .cloned()
                 .collect::<Vec<_>>();
+            let len = neighbor_ids.len();
             for _ in 0..config().gossip_fanout {
-                let index = rng().lock().await.gen_range(0..neighbors.len());
-                neighbors[index].send_msg(msg).await;
+                let index = rng().lock().await.gen_range(0..len);
+                if let Some(nerghbor) = self.neighbors.read().await.get(&neighbor_ids[index]) {
+                    let _ = nerghbor.send_msg(msg).await;
+                }
             }
         }
     }
@@ -562,28 +579,6 @@ impl Server {
                 } else {
                     break;
                 }
-            }
-        }
-
-        let mut remove_ids = vec![];
-        {
-            self.neighbors.read().await.values().for_each(|neighbor| {
-                if let Some(reason) = neighbor.connection.close_reason() {
-                    remove_ids.push((neighbor.id, neighbor.locator.clone(), reason));
-                }
-            });
-        }
-
-        {
-            let mut neighbors = self.neighbors.write().await;
-            let mut connect_neighbors = self.connect_neighbors.write().await;
-            for (remove_id, locator, reason) in remove_ids {
-                let locator = locator.lock().await;
-                connect_neighbors.remove(locator.as_str());
-                neighbors.remove(&remove_id);
-                self.check_member_list.write().await.push(remove_id);
-
-                info!("neighbor({}) [{}] closed: {}", remove_id, locator, reason);
             }
         }
     }

@@ -1,4 +1,6 @@
+use common_x::signal::shutdown_signal;
 use eldegoss::{protocol::Message, quic::Server, Config};
+use tokio::select;
 use tracing::info;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 15)]
@@ -23,13 +25,20 @@ async fn main() {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
     let mut count = 0;
     loop {
-        interval.tick().await;
-        let msg = Message::pub_msg("topic".to_string(), vec![count]);
-        server.send_msg(msg).await;
-        stats.increment();
-        count += 1;
-        if count == 100 {
-            count = 0;
+        select! {
+            _ = interval.tick() => {
+                let msg = Message::pub_msg("topic".to_string(), vec![count]);
+                server.send_msg(msg).await;
+                stats.increment();
+                count += 1;
+                if count == 100 {
+                    count = 0;
+                }
+            }
+            _ = shutdown_signal() => {
+                info!("shutdown");
+                break;
+            }
         }
     }
 }

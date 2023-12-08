@@ -1,4 +1,6 @@
+use common_x::signal::shutdown_signal;
 use eldegoss::{quic::Server, Config};
+use tokio::select;
 use tracing::info;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 31)]
@@ -20,8 +22,16 @@ async fn main() {
     let server = Server::serve(config).await;
 
     let mut stats = eldegoss::util::Stats::new(10000);
-    while let Ok(msg) = server.recv_msg().await {
-        info!("recv msg: {} - {}", msg.origin(), msg.topic());
-        stats.increment();
+    loop {
+        select! {
+            Ok(msg) = server.recv_msg() => {
+                info!("recv msg: {} - {}", msg.origin(), msg.topic());
+                stats.increment();
+            }
+            _ = shutdown_signal() => {
+                info!("shutdown");
+                break;
+            }
+        }
     }
 }
