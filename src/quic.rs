@@ -38,6 +38,7 @@ fn rng() -> &'static Mutex<ChaCha8Rng> {
     RNG.get_or_init(|| Mutex::new(ChaCha8Rng::seed_from_u64(rand::random())))
 }
 
+#[inline]
 async fn read_msg(recv: &mut RecvStream) -> Result<Message> {
     let mut length = [0_u8, 0_u8, 0_u8, 0_u8];
     recv.read_exact(&mut length).await?;
@@ -47,6 +48,7 @@ async fn read_msg(recv: &mut RecvStream) -> Result<Message> {
     decode_msg(bytes)
 }
 
+#[inline]
 pub async fn write_msg(send: &mut SendStream, mut msg: Message) -> Result<()> {
     msg.set_origin(config().id);
     let mut msg_bytes = encode_msg(&msg);
@@ -99,6 +101,7 @@ impl Neighbor {
         });
     }
 
+    #[inline]
     pub async fn send_msg(&self, msg: &Message) -> Result<()> {
         let msg_bytes = encode_msg(msg);
         let len = msg_bytes.len() as u32;
@@ -149,10 +152,12 @@ impl Server {
         server
     }
 
+    #[inline]
     pub async fn recv_msg(&self) -> Result<Message> {
         Ok(self.msg_for_recv.1.recv_async().await?)
     }
 
+    #[inline]
     pub async fn send_msg(&self, mut msg: Message) {
         msg.set_origin(config().id);
         if msg.to() != 0 {
@@ -164,6 +169,7 @@ impl Server {
         self.gossip_msg(&msg, 0).await;
     }
 
+    #[inline]
     async fn to_recv_msg(&self, msg: Message) {
         if let Err(e) = self.msg_for_recv.0.send_async(msg).await {
             debug!("to_recv_msg failed: {:?}", e);
@@ -190,7 +196,7 @@ impl Server {
             if self.connect_neighbors.lock().await.contains_key(conn) {
                 continue;
             }
-            let _ = self.connect_to(&client_config, conn.to_string());
+            self.connect_to(&client_config, conn.to_string()).await.ok();
         }
 
         let server = self.clone();
@@ -205,29 +211,29 @@ impl Server {
                         continue;
                     }
                     info!("reconnect to: {conn}");
-                    let _ = server.connect_to(&client_config, conn.to_string());
+                    server
+                        .connect_to(&client_config, conn.to_string())
+                        .await
+                        .ok();
                 }
             }
         });
         Ok(())
     }
 
-    fn connect_to(&self, client_config: &ClientConfig, connect: String) -> Result<()> {
+    async fn connect_to(&self, client_config: &ClientConfig, connect: String) -> Result<()> {
         let mut endpoint = Endpoint::client("[::]:0".parse::<std::net::SocketAddr>()?)?;
         endpoint.set_default_client_config(client_config.clone());
-        let server = self.clone();
-        tokio::spawn(async move {
-            if let Ok(connection) = endpoint
-                .connect(
-                    connect.parse::<std::net::SocketAddr>().unwrap(),
-                    "localhost",
-                )
-                .unwrap()
-                .await
-            {
-                let _ = server.join(connection, connect).await;
-            }
-        });
+        if let Ok(connection) = endpoint
+            .connect(
+                connect.parse::<std::net::SocketAddr>().unwrap(),
+                "localhost",
+            )
+            .unwrap()
+            .await
+        {
+            let _ = self.join(connection, connect).await;
+        }
         Ok(())
     }
 
@@ -265,7 +271,7 @@ impl Server {
         }
     }
 
-    async fn join(self, connection: Connection, locator: String) -> Result<()> {
+    async fn join(&self, connection: Connection, locator: String) -> Result<()> {
         let Config { msg_timeout, .. } = config();
         let remote_address = connection.remote_address();
         let mut msg_timeout = tokio::time::interval(Duration::from_secs(*msg_timeout));
@@ -420,6 +426,7 @@ impl Server {
         self.neighbors.write().await.insert(neighbor.id, neighbor);
     }
 
+    #[inline]
     async fn dispatch(&self, msg: Message, received_from: u128) {
         // debug!("dispatch({received_from}) msg: {:?}", msg);
         match (msg.to(), msg.topic().as_str()) {
@@ -455,6 +462,7 @@ impl Server {
         }
     }
 
+    #[inline]
     async fn handle_recv_msg(&self, msg: Message) {
         match &msg {
             Message::EldegossMsg(EldegossMsg {
@@ -501,6 +509,7 @@ impl Server {
         }
     }
 
+    #[inline]
     async fn gossip_msg(&self, msg: &Message, received_from: u128) {
         if received_from != 0 && msg.origin() == config().id {
             return;
