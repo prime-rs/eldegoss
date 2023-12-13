@@ -11,7 +11,7 @@ use crate::{
     EldegossId,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Link {
     id: EldegossId,
     locator: String,
@@ -53,34 +53,43 @@ impl Link {
     }
 
     pub(crate) fn handle(&self) {
-        let id = self.id.to_u128();
-        let recv = self.recv.clone();
-        let connection = self.connection.clone();
-        let locator = self.locator.clone();
-        let server = self.server.clone();
+        let link = self.clone();
         tokio::spawn(async move {
-            let mut recv = recv.lock().await;
-            loop {
-                match read_msg(&mut recv).await {
-                    Ok(msg) => {
-                        let server = server.clone();
-                        tokio::spawn(async move {
-                            server.dispatch(msg, id).await;
-                        });
+            link.handle_msg().await;
+        });
+    }
+
+    async fn handle_msg(&self) {
+        let Link {
+            id,
+            locator,
+            connection,
+            recv,
+            server,
+            ..
+        } = self;
+        let mut recv = recv.lock().await;
+        loop {
+            match read_msg(&mut recv).await {
+                Ok(msg) => {
+                    let server = server.clone();
+                    let id = id.to_u128();
+                    tokio::spawn(async move {
+                        server.dispatch(msg, id).await;
+                    });
+                }
+                Err(e) => {
+                    debug!("link handle recv msg failed: {e}");
+                    if let Some(close_reason) = connection.close_reason() {
+                        server.connect_links.lock().await.remove(locator);
+                        server.links.write().await.remove(id);
+                        server.check_member_list.lock().await.push(*id);
+                        info!("link({id}) closed: {close_reason}");
                     }
-                    Err(e) => {
-                        debug!("link handle recv msg failed: {e}");
-                        if let Some(close_reason) = connection.close_reason() {
-                            server.connect_links.lock().await.remove(&locator);
-                            server.links.write().await.remove(&id.into());
-                            server.check_member_list.lock().await.push(id.into());
-                            info!("link({id}) closed: {close_reason}");
-                        }
-                        break;
-                    }
+                    break;
                 }
             }
-        });
+        }
     }
 
     #[inline]
