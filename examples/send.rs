@@ -9,7 +9,6 @@ async fn main() {
 
     let config = Config {
         id: 2,
-        // connect: ["127.0.0.1:4721".to_string()].to_vec(),
         listen: "[::]:4722".to_string(),
         cert_path: "./config/cert/client_cert.pem".into(),
         private_key_path: "./config/cert/client_key.pem".into(),

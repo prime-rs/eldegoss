@@ -17,7 +17,7 @@ use tokio::select;
 
 use crate::{
     link::Link,
-    protocol::{EldegossMsg, EldegossMsgBody, Message},
+    protocol::{encode_msg, EldegossMsg, EldegossMsgBody, Message},
     util::{read_msg, write_msg},
     Config, EldegossId, Member, Membership,
 };
@@ -42,9 +42,9 @@ type MsgForRecv = (Sender<Message>, Receiver<Message>);
 #[derive(Debug, Clone)]
 pub struct Server {
     pub(crate) msg_for_recv: MsgForRecv,
-    pub(crate) links: Arc<RwLock<HashMap<EldegossId, Link>>>,
+    pub(crate) links: Arc<RwLock<HashMap<EldegossId, Sender<Vec<u8>>>>>,
     pub(crate) membership: Arc<Mutex<Membership>>,
-    pub(crate) connect_links: Arc<Mutex<HashMap<String, u128>>>,
+    pub(crate) connected_locators: Arc<Mutex<HashMap<String, u128>>>,
     pub(crate) check_member_list: Arc<Mutex<Vec<EldegossId>>>,
     pub(crate) wait_for_remove_member_list: Arc<Mutex<Vec<EldegossId>>>,
 }
@@ -59,7 +59,7 @@ impl Server {
             msg_for_recv: flume::unbounded(),
             links: Default::default(),
             membership: Arc::new(Mutex::new(membership)),
-            connect_links: Default::default(),
+            connected_locators: Default::default(),
             check_member_list: Default::default(),
             wait_for_remove_member_list: Default::default(),
         }
@@ -82,7 +82,7 @@ impl Server {
         msg.set_origin(config().id);
         if msg.to() != 0 {
             if let Some(link) = self.links.read().await.get(&msg.to().into()) {
-                let _ = link.send_msg(&msg).await;
+                let _ = link.send_async(encode_msg(&msg)).await;
                 return;
             }
         }
@@ -113,7 +113,7 @@ impl Server {
         client_config.transport_config(Arc::new(transport_config));
 
         for conn in connect {
-            if self.connect_links.lock().await.contains_key(conn) {
+            if self.connected_locators.lock().await.contains_key(conn) {
                 continue;
             }
             self.connect_to(&client_config, conn.to_string()).await.ok();
@@ -127,7 +127,7 @@ impl Server {
             loop {
                 interval.tick().await;
                 for conn in connect {
-                    if server.connect_links.lock().await.contains_key(conn) {
+                    if server.connected_locators.lock().await.contains_key(conn) {
                         continue;
                     }
                     info!("reconnect to: {conn}");
@@ -221,25 +221,27 @@ impl Server {
                         self.membership.lock().await.merge(&membership);
                     }
 
-                    let link = Link::new(
-                        origin.into(),
-                        locator.clone(),
+                    let (send, recv) = flume::unbounded();
+                    let link = Link {
+                        id: origin.into(),
+                        locator: locator.clone(),
                         connection,
-                        self.clone(),
-                        tx,
-                        rv,
-                    );
+                        server: self.clone(),
+                        send:tx,
+                        recv:rv,
+                        msg_to_send: recv,
+                    };
                     let mut is_old = false;
-                    if let Some(old_link) = self.links.write().await.get_mut(&link.id()) {
-                        old_link.set_locator(locator.clone());
+                    if self.links.read().await.contains_key(&link.id()) {
                         info!("update link({}): {remote_address}", origin);
-                        self.connect_links.lock().await.insert(locator.clone(), origin);
+                        self.connected_locators.lock().await.insert(locator.clone(), origin);
                         is_old = true;
                     }
                     if !is_old {
-                        link.handle();
+                        let id = link.id();
+                        tokio::spawn(link.handle());
                         info!("new link({}): {remote_address}", origin);
-                        self.insert_link(locator, link).await;
+                        self.insert_link(id, locator, send).await;
                     }
 
                     Ok(())
@@ -267,7 +269,7 @@ impl Server {
                         let mut is_reconnect = false;
                         let is_new = if let Some(link) = self.links.read().await.get(&origin.into())
                         {
-                            if link.close_reason().is_some() {
+                            if link.is_disconnected() {
                                 is_reconnect = true;
                             }
                             false
@@ -297,18 +299,21 @@ impl Server {
                         self.send_msg(Message::eldegoss(0, EldegossMsgBody::AddMember(member)))
                             .await;
 
-                        let link = Link::new(
-                            origin.into(),
-                            remote_address.to_string(),
+                        let (send, recv) = flume::unbounded();
+                        let link = Link {
+                            id: origin.into(),
+                            locator: remote_address.to_string(),
                             connection,
-                            self.clone(),
-                            tx,
-                            rv,
-                        );
-                        link.handle();
+                            server: self.clone(),
+                            send: tx,
+                            recv: rv,
+                            msg_to_send: recv,
+                        };
+                        let id = link.id();
+                        tokio::spawn(link.handle());
                         info!("new link({origin}): {remote_address}");
 
-                        self.insert_link(remote_address.to_string(), link).await;
+                        self.insert_link(id, remote_address.to_string(), send).await;
 
                         Ok(())
                     } else {
@@ -327,19 +332,22 @@ impl Server {
         }
     }
 
-    async fn insert_link(&self, locator: String, link: Link) {
-        let id = link.id_u128();
+    async fn insert_link(&self, id: EldegossId, locator: String, link: Sender<Vec<u8>>) {
+        let id_u128 = id.to_u128();
         self.wait_for_remove_member_list
             .lock()
             .await
-            .retain(|x| x.to_u128() != id);
+            .retain(|x| x.to_u128() != id_u128);
         self.check_member_list
             .lock()
             .await
-            .retain(|x| x.to_u128() != id);
+            .retain(|x| x.to_u128() != id_u128);
 
-        self.connect_links.lock().await.insert(locator, id);
-        self.links.write().await.insert(link.id(), link);
+        self.connected_locators
+            .lock()
+            .await
+            .insert(locator, id_u128);
+        self.links.write().await.insert(id, link);
     }
 
     #[inline]
@@ -361,7 +369,7 @@ impl Server {
                 if to == config().id {
                     self.handle_recv_msg(msg).await;
                 } else if let Some(link) = self.links.read().await.get(&to.into()) {
-                    let _ = link.send_msg(&msg).await;
+                    let _ = link.send_async(encode_msg(&msg)).await;
                 } else {
                     self.gossip_msg(&msg, received_from).await;
                 }
@@ -427,10 +435,10 @@ impl Server {
             return;
         }
         if self.links.read().await.len() <= config().gossip_fanout {
-            for (_, link) in self.links.read().await.iter() {
-                let link_id = link.id_u128();
+            for (id, link) in self.links.read().await.iter() {
+                let link_id = id.to_u128();
                 if link_id != msg.origin() && link_id != received_from {
-                    let _ = link.send_msg(msg).await;
+                    let _ = link.send_async(encode_msg(msg)).await;
                 }
             }
         } else {
@@ -449,7 +457,7 @@ impl Server {
             for _ in 0..config().gossip_fanout {
                 let index = rng().lock().await.gen_range(0..len);
                 if let Some(nerghbor) = self.links.read().await.get(&link_ids[index]) {
-                    let _ = nerghbor.send_msg(msg).await;
+                    let _ = nerghbor.send_async(encode_msg(msg)).await;
                 }
             }
         }
