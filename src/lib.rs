@@ -2,18 +2,16 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::hash::Hash;
 
-use quic::config;
 use serde::{Deserialize, Serialize};
+use server::config;
 
 #[macro_use]
 extern crate tracing as logger;
 
+pub(crate) mod link;
 pub mod protocol;
-pub mod quic;
+pub mod server;
 pub mod util;
-
-pub type QuicSendStream = quinn::SendStream;
-pub type QuicRecvStream = quinn::RecvStream;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[repr(transparent)]
@@ -68,7 +66,7 @@ pub struct Config {
     pub subscription_list: Vec<String>,
 
     pub keep_alive_interval: u64,
-    pub check_neighbor_interval: u64,
+    pub check_link_interval: u64,
     pub msg_timeout: u64,
 
     pub gossip_fanout: usize,
@@ -85,7 +83,7 @@ impl Default for Config {
             private_key_path: Default::default(),
             subscription_list: Default::default(),
             keep_alive_interval: 5,
-            check_neighbor_interval: 1,
+            check_link_interval: 1,
             msg_timeout: 2,
             gossip_fanout: 3,
         }

@@ -1,5 +1,5 @@
 use common_x::signal::shutdown_signal;
-use eldegoss::{protocol::Message, quic::Server, Config};
+use eldegoss::{protocol::Message, server::Server, Config};
 use tokio::select;
 use tracing::info;
 

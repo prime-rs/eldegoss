@@ -1,4 +1,4 @@
-use eldegoss::{protocol::Message, quic::Server, Config};
+use eldegoss::{protocol::Message, server::Server, Config};
 use tracing::info;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 15)]

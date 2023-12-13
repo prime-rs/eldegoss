@@ -1,4 +1,14 @@
+use std::future::Future;
 use std::time::Instant;
+
+use color_eyre::Result;
+use futures::stream::{FuturesUnordered, StreamExt};
+use quinn::{RecvStream, SendStream};
+
+use crate::{
+    protocol::{decode_msg, encode_msg, Message},
+    server::config,
+};
 
 #[derive(Debug)]
 pub struct Stats {
@@ -48,4 +58,42 @@ impl Drop for Stats {
             info!("Received {total} messages over {elapsed:.2}s: {throughtput}msg/s");
         }
     }
+}
+
+#[inline]
+pub async fn read_msg(recv: &mut RecvStream) -> Result<Message> {
+    let mut length = [0_u8, 0_u8, 0_u8, 0_u8];
+    recv.read_exact(&mut length).await?;
+    let n = u32::from_le_bytes(length) as usize;
+    let bytes = &mut vec![0_u8; n];
+    recv.read_exact(bytes).await?;
+    decode_msg(bytes)
+}
+
+#[inline]
+pub async fn write_msg(send: &mut SendStream, mut msg: Message) -> Result<()> {
+    msg.set_origin(config().id);
+    let mut msg_bytes = encode_msg(&msg);
+    let mut bytes = (msg_bytes.len() as u32).to_le_bytes().to_vec();
+    bytes.append(&mut msg_bytes);
+    send.write_all(&bytes).await?;
+    Ok(())
+}
+
+pub async fn select_ok<F, A, B>(futs: impl IntoIterator<Item = F>) -> Result<A, B>
+where
+    F: Future<Output = Result<A, B>>,
+{
+    let mut futs: FuturesUnordered<F> = futs.into_iter().collect();
+
+    let mut last_error: Option<B> = None;
+    while let Some(next) = futs.next().await {
+        match next {
+            Ok(ok) => return Ok(ok),
+            Err(err) => {
+                last_error = Some(err);
+            }
+        }
+    }
+    Err(last_error.expect("Empty iterator."))
 }
