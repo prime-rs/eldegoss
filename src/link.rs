@@ -44,7 +44,7 @@ impl Link {
                         });
                     }
                     Err(e) => {
-                        debug!("link handle recv msg failed: {e}");
+                        error!("link handle recv msg failed: {e}");
                         if let Some(close_reason) = connection.close_reason() {
                             server.connected_locators.lock().await.remove(&locator);
                             server.links.write().await.remove(&id);
@@ -63,5 +63,6 @@ impl Link {
                 },
             }
         }
+        info!("link({id}) handle end");
     }
 }

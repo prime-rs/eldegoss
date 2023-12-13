@@ -82,7 +82,7 @@ impl Server {
         msg.set_origin(config().id);
         if msg.to() != 0 {
             if let Some(link) = self.links.read().await.get(&msg.to().into()) {
-                let _ = link.send_async(encode_msg(&msg)).await;
+                let _ = link.send_timeout(encode_msg(&msg), Duration::from_secs(1));
                 return;
             }
         }
@@ -221,14 +221,14 @@ impl Server {
                         self.membership.lock().await.merge(&membership);
                     }
 
-                    let (send, recv) = flume::unbounded();
+                    let (send, recv) = flume::bounded(500000);
                     let link = Link {
                         id: origin.into(),
                         locator: locator.clone(),
                         connection,
                         server: self.clone(),
-                        send:tx,
-                        recv:rv,
+                        send: tx,
+                        recv: rv,
                         msg_to_send: recv,
                     };
                     let mut is_old = false;
@@ -299,7 +299,7 @@ impl Server {
                         self.send_msg(Message::eldegoss(0, EldegossMsgBody::AddMember(member)))
                             .await;
 
-                        let (send, recv) = flume::unbounded();
+                        let (send, recv) = flume::bounded(500000);
                         let link = Link {
                             id: origin.into(),
                             locator: remote_address.to_string(),
@@ -353,6 +353,9 @@ impl Server {
     #[inline]
     pub(crate) async fn dispatch(&self, msg: Message, received_from: u128) {
         // debug!("dispatch({received_from}) msg: {:?}", msg);
+        if let Message::None = msg {
+            return;
+        }
         match (msg.to(), msg.topic().as_str()) {
             (0, "") => {
                 self.gossip_msg(&msg, received_from).await;
@@ -369,7 +372,7 @@ impl Server {
                 if to == config().id {
                     self.handle_recv_msg(msg).await;
                 } else if let Some(link) = self.links.read().await.get(&to.into()) {
-                    let _ = link.send_async(encode_msg(&msg)).await;
+                    let _ = link.send_timeout(encode_msg(&msg), Duration::from_secs(1));
                 } else {
                     self.gossip_msg(&msg, received_from).await;
                 }
@@ -438,7 +441,7 @@ impl Server {
             for (id, link) in self.links.read().await.iter() {
                 let link_id = id.to_u128();
                 if link_id != msg.origin() && link_id != received_from {
-                    let _ = link.send_async(encode_msg(msg)).await;
+                    let _ = link.send_timeout(encode_msg(msg), Duration::from_secs(1));
                 }
             }
         } else {
@@ -457,7 +460,7 @@ impl Server {
             for _ in 0..config().gossip_fanout {
                 let index = rng().lock().await.gen_range(0..len);
                 if let Some(nerghbor) = self.links.read().await.get(&link_ids[index]) {
-                    let _ = nerghbor.send_async(encode_msg(msg)).await;
+                    let _ = nerghbor.send_timeout(encode_msg(msg), Duration::from_secs(1));
                 }
             }
         }

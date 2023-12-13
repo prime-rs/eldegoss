@@ -4,7 +4,7 @@ use std::{
 };
 
 use bitflags::bitflags;
-use color_eyre::{eyre::eyre, Result};
+use color_eyre::{eyre::Ok, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::{Member, Membership};
@@ -57,6 +57,7 @@ pub struct EldegossMsg {
 pub enum Message {
     EldegossMsg(EldegossMsg),
     Msg(Msg),
+    None,
 }
 
 impl Message {
@@ -99,6 +100,7 @@ impl Message {
         match self {
             Message::EldegossMsg(msg) => msg.origin,
             Message::Msg(msg) => msg.origin,
+            Message::None => 0,
         }
     }
 
@@ -106,6 +108,7 @@ impl Message {
         match self {
             Message::EldegossMsg(msg) => msg.to,
             Message::Msg(msg) => msg.to,
+            Message::None => 0,
         }
     }
 
@@ -113,6 +116,7 @@ impl Message {
         match self {
             Message::EldegossMsg(_) => "".to_owned(),
             Message::Msg(msg) => msg.topic.clone(),
+            Message::None => "".to_owned(),
         }
     }
 
@@ -120,6 +124,7 @@ impl Message {
         match self {
             Message::EldegossMsg(msg) => msg.origin = origin,
             Message::Msg(msg) => msg.origin = origin,
+            Message::None => {}
         }
     }
 
@@ -127,6 +132,7 @@ impl Message {
         match self {
             Message::EldegossMsg(msg) => msg.to = to,
             Message::Msg(msg) => msg.to = to,
+            Message::None => {}
         }
     }
 }
@@ -177,12 +183,16 @@ pub fn encode_msg(msg: &Message) -> Vec<u8> {
             buf.extend_from_slice(&msg.body);
             buf
         }
+        Message::None => vec![],
     }
 }
 
 /// decode msg from bytes.
 /// Notes: origin is not set in here, it should be set by receiver.
 pub fn decode_msg(msg: &[u8]) -> Result<Message> {
+    if msg.len() < 17 {
+        return Ok(Message::None);
+    }
     let flags = Flags::from_bits_truncate(msg[0]);
     let origin = u128::from_be_bytes(msg[1..17].try_into()?);
     match flags {
@@ -241,7 +251,7 @@ pub fn decode_msg(msg: &[u8]) -> Result<Message> {
                 body,
             }))
         }
-        _ => Err(eyre!("unknown flags")),
+        _ => Ok(Message::None),
     }
 }
 

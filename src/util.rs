@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::time::Instant;
 
-use color_eyre::{eyre::eyre, Result};
+use color_eyre::Result;
 use futures::stream::{FuturesUnordered, StreamExt};
 use quinn::{RecvStream, SendStream};
 
@@ -66,7 +66,7 @@ pub async fn read_msg(recv: &mut RecvStream) -> Result<Message> {
     recv.read_exact(&mut length).await?;
     let n = u32::from_le_bytes(length) as usize;
     if n == 0 {
-        return Err(eyre!("read 0 bytes"));
+        return Ok(Message::None);
     }
     let bytes = &mut vec![0_u8; n];
     recv.read_exact(bytes).await?;
