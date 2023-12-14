@@ -32,7 +32,6 @@ impl Link {
             ..
         } = self;
 
-        let mut stats = crate::util::Stats::new(10000);
         loop {
             select! {
                 result = read_msg(&mut recv) => match result {
@@ -59,7 +58,6 @@ impl Link {
                     let len_bytes = len.to_le_bytes().to_vec();
                     send.write_all(&len_bytes).await.ok();
                     send.write_all(&msg_bytes).await.ok();
-                    stats.increment();
                 },
             }
         }
