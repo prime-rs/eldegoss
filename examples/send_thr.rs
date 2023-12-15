@@ -1,7 +1,7 @@
 use eldegoss::{protocol::Message, server::Server, Config};
 use tracing::info;
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 15)]
+#[tokio::main(flavor = "multi_thread", worker_threads = 29)]
 async fn main() {
     common_x::log::init_log_filter("info");
 

@@ -66,6 +66,7 @@ pub async fn read_msg(recv: &mut RecvStream) -> Result<Message> {
     recv.read_exact(&mut length).await?;
     let n = u32::from_le_bytes(length) as usize;
     if n == 0 {
+        error!("read 0 bytes");
         return Ok(Message::None);
     }
     let bytes = &mut vec![0_u8; n];

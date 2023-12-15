@@ -11,8 +11,6 @@ use flume::{Receiver, Sender};
 use quinn::{ClientConfig, Connecting, Connection, Endpoint, ServerConfig, TransportConfig};
 
 use common_x::cert::{create_any_server_name_config, read_certs, read_key};
-use rand::{Rng, SeedableRng};
-use rand_chacha::ChaCha8Rng;
 use tokio::select;
 
 use crate::{
@@ -30,11 +28,6 @@ fn init_config(config: Config) {
 
 pub fn config() -> &'static Config {
     CONFIG.get_or_init(Config::default)
-}
-
-fn rng() -> &'static Mutex<ChaCha8Rng> {
-    static RNG: OnceLock<Mutex<ChaCha8Rng>> = OnceLock::new();
-    RNG.get_or_init(|| Mutex::new(ChaCha8Rng::seed_from_u64(rand::random())))
 }
 
 type MsgForRecv = (Sender<Message>, Receiver<Message>);
@@ -227,9 +220,10 @@ impl Server {
                         locator: locator.clone(),
                         connection,
                         server: self.clone(),
-                        send: tx,
-                        recv: rv,
+                        send: vec![tx],
+                        recv: vec![rv],
                         msg_to_send: recv,
+                        is_server: true,
                     };
                     let mut is_old = false;
                     if self.links.read().await.contains_key(&link.id()) {
@@ -305,9 +299,10 @@ impl Server {
                             locator: remote_address.to_string(),
                             connection,
                             server: self.clone(),
-                            send: tx,
-                            recv: rv,
+                            send: vec![tx],
+                            recv: vec![rv],
                             msg_to_send: recv,
+                            is_server: false,
                         };
                         let id = link.id();
                         tokio::spawn(link.handle());
@@ -434,35 +429,28 @@ impl Server {
 
     #[inline]
     async fn gossip_msg(&self, msg: &Message, received_from: u128) {
-        if received_from != 0 && msg.origin() == config().id {
+        if self.links.read().await.is_empty() || (received_from != 0 && msg.origin() == config().id)
+        {
             return;
         }
-        if self.links.read().await.len() <= config().gossip_fanout {
-            for (id, link) in self.links.read().await.iter() {
-                let link_id = id.to_u128();
-                if link_id != msg.origin() && link_id != received_from {
-                    let _ = link.send_timeout(encode_msg(msg), Duration::from_secs(1));
+        let links = self
+            .links
+            .read()
+            .await
+            .iter()
+            .filter_map(|(eid, tx)| {
+                let id = eid.to_u128();
+                if id != msg.origin() && id != received_from {
+                    Some((*eid, tx.clone()))
+                } else {
+                    None
                 }
-            }
-        } else {
-            let link_ids = self
-                .links
-                .read()
-                .await
-                .keys()
-                .filter(|eid| {
-                    let id = eid.to_u128();
-                    id != msg.origin() && id != received_from
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            let len = link_ids.len();
-            for _ in 0..config().gossip_fanout {
-                let index = rng().lock().await.gen_range(0..len);
-                if let Some(nerghbor) = self.links.read().await.get(&link_ids[index]) {
-                    let _ = nerghbor.send_timeout(encode_msg(msg), Duration::from_secs(1));
-                }
-            }
+            })
+            .clone()
+            .collect::<Vec<_>>();
+
+        for link in links {
+            let _ = link.1.send(encode_msg(msg)).ok();
         }
     }
 

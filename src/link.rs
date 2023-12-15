@@ -1,8 +1,13 @@
+use color_eyre::Result;
 use flume::Receiver;
-use quinn::Connection;
-use tokio::select;
+use quinn::{Connection, RecvStream, SendStream};
 
-use crate::{server::Server, util::read_msg, EldegossId};
+use crate::{
+    protocol::Message,
+    server::Server,
+    util::{read_msg, write_msg},
+    EldegossId,
+};
 
 #[derive(Debug)]
 pub(crate) struct Link {
@@ -10,9 +15,10 @@ pub(crate) struct Link {
     pub(crate) locator: String,
     pub(crate) connection: Connection,
     pub(crate) msg_to_send: Receiver<Vec<u8>>,
-    pub(crate) send: quinn::SendStream,
-    pub(crate) recv: quinn::RecvStream,
+    pub(crate) send: Vec<SendStream>,
+    pub(crate) recv: Vec<RecvStream>,
     pub(crate) server: Server,
+    pub(crate) is_server: bool,
 }
 
 impl Link {
@@ -32,35 +38,73 @@ impl Link {
             ..
         } = self;
 
-        loop {
-            select! {
-                result = read_msg(&mut recv) => match result {
-                    Ok(msg) => {
-                        let server = server.clone();
-                        let id = id.to_u128();
-                        tokio::spawn(async move {
-                            server.dispatch(msg, id).await;
-                        });
-                    }
-                    Err(e) => {
-                        error!("link handle recv msg failed: {e}");
-                        if let Some(close_reason) = connection.close_reason() {
-                            server.connected_locators.lock().await.remove(&locator);
-                            server.links.write().await.remove(&id);
-                            server.check_member_list.lock().await.push(id);
-                            info!("link({id}) closed: {close_reason}");
-                        }
-                        break;
-                    }
-                },
-                Ok(msg_bytes) = msg_to_send.recv_async() => {
-                    let len = msg_bytes.len() as u32;
-                    let len_bytes = len.to_le_bytes().to_vec();
-                    send.write_all(&len_bytes).await.ok();
-                    send.write_all(&msg_bytes).await.ok();
-                },
+        if self.is_server {
+            while send.len() < 16 {
+                if let Ok((mut tx, rv)) = connection.open_bi().await {
+                    write_msg(&mut tx, Message::to_msg(id.to_u128(), vec![]))
+                        .await
+                        .ok();
+                    send.push(tx);
+                    recv.push(rv);
+                }
+            }
+        } else {
+            while send.len() < 16 {
+                if let Ok((tx, rv)) = connection.accept_bi().await {
+                    send.push(tx);
+                    recv.push(rv);
+                }
             }
         }
-        info!("link({id}) handle end");
+
+        for tx in send {
+            tokio::spawn(writer(msg_to_send.clone(), tx));
+        }
+        for rv in recv {
+            tokio::spawn(reader(
+                server.clone(),
+                id,
+                locator.clone(),
+                connection.clone(),
+                rv,
+            ));
+        }
     }
+}
+
+async fn reader(
+    server: Server,
+    id: EldegossId,
+    locator: String,
+    connection: Connection,
+    mut recv: RecvStream,
+) {
+    loop {
+        match read_msg(&mut recv).await {
+            Ok(msg) => {
+                let id = id.to_u128();
+                server.dispatch(msg, id).await;
+            }
+            Err(e) => {
+                error!("link handle recv msg failed: {e}");
+                if let Some(close_reason) = connection.close_reason() {
+                    server.connected_locators.lock().await.remove(&locator);
+                    server.links.write().await.remove(&id);
+                    server.check_member_list.lock().await.push(id);
+                    info!("link({id}) closed: {close_reason}");
+                }
+                break;
+            }
+        }
+    }
+}
+
+async fn writer(msg_to_send: Receiver<Vec<u8>>, mut send: SendStream) -> Result<()> {
+    while let Ok(msg_bytes) = msg_to_send.recv_async().await {
+        let len = msg_bytes.len() as u32;
+        let len_bytes = len.to_le_bytes().to_vec();
+        send.write_all(&len_bytes).await?;
+        send.write_all(&msg_bytes).await?;
+    }
+    Ok(())
 }
