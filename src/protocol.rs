@@ -87,11 +87,11 @@ impl Message {
         })
     }
 
-    pub fn pub_msg(topic: String, body: Vec<u8>) -> Self {
+    pub fn pub_msg(topic: &str, body: Vec<u8>) -> Self {
         Self::Msg(Msg {
             origin: 0,
             to: 0,
-            topic,
+            topic: topic.to_owned(),
             body,
         })
     }
@@ -139,10 +139,10 @@ impl Message {
 
 #[derive(Debug, Default)]
 pub struct Msg {
-    origin: u128,
-    to: u128,
-    topic: String,
-    body: Vec<u8>,
+    pub origin: u128,
+    pub to: u128,
+    pub topic: String,
+    pub body: Vec<u8>,
 }
 
 pub fn encode_msg(msg: &Message) -> Vec<u8> {

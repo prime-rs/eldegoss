@@ -20,7 +20,7 @@ async fn main() {
 
     let mut stats = eldegoss::util::Stats::new(10000);
     loop {
-        let msg = Message::pub_msg("topic".to_string(), vec![0; 1024]);
+        let msg = Message::pub_msg("topic", vec![0; 1024]);
         server.send_msg(msg).await;
         stats.increment();
     }

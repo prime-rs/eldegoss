@@ -26,7 +26,7 @@ async fn main() {
     loop {
         select! {
             _ = interval.tick() => {
-                let msg = Message::pub_msg("topic".to_string(), vec![count]);
+                let msg = Message::pub_msg("topic", vec![count]);
                 server.send_msg(msg).await;
                 stats.increment();
                 count += 1;
