@@ -145,6 +145,7 @@ pub struct Msg {
     pub body: Vec<u8>,
 }
 
+#[inline]
 pub fn encode_msg(msg: &Message) -> Vec<u8> {
     let mut buf = Vec::new();
     match msg {
@@ -189,6 +190,7 @@ pub fn encode_msg(msg: &Message) -> Vec<u8> {
 
 /// decode msg from bytes.
 /// Notes: origin is not set in here, it should be set by receiver.
+#[inline]
 pub fn decode_msg(msg: &[u8]) -> Result<Message> {
     if msg.len() < 17 {
         return Ok(Message::None);
