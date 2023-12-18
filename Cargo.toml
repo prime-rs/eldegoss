@@ -14,7 +14,6 @@ keywords = ["network", "p2p", "gossip", "SWIM"]
 default = []
 
 [dependencies]
-async-lock = "3.2"
 bincode = "1.3"
 bitflags = "2.4"
 color-eyre = "0.6"

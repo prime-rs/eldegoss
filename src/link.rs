@@ -2,12 +2,7 @@ use color_eyre::Result;
 use flume::Receiver;
 use quinn::{Connection, RecvStream, SendStream};
 
-use crate::{
-    protocol::Message,
-    session::Session,
-    util::{read_msg, write_msg},
-    EldegossId,
-};
+use crate::{session::Session, util::read_msg, EldegossId};
 
 #[derive(Debug)]
 pub(crate) struct Link {
@@ -15,10 +10,9 @@ pub(crate) struct Link {
     pub(crate) locator: String,
     pub(crate) connection: Connection,
     pub(crate) msg_to_send: Receiver<Vec<u8>>,
-    pub(crate) send: Vec<SendStream>,
-    pub(crate) recv: Vec<RecvStream>,
+    pub(crate) send: SendStream,
+    pub(crate) recv: RecvStream,
     pub(crate) session: Session,
-    pub(crate) is_server: bool,
 }
 
 impl Link {
@@ -31,44 +25,15 @@ impl Link {
             id,
             locator,
             connection,
-            mut recv,
-            mut send,
+            recv,
+            send,
             session,
             msg_to_send,
             ..
         } = self;
 
-        if self.is_server {
-            while send.len() < 16 {
-                if let Ok((mut tx, rv)) = connection.open_bi().await {
-                    write_msg(&mut tx, Message::to_msg(id.to_u128(), vec![]))
-                        .await
-                        .ok();
-                    send.push(tx);
-                    recv.push(rv);
-                }
-            }
-        } else {
-            while send.len() < 16 {
-                if let Ok((tx, rv)) = connection.accept_bi().await {
-                    send.push(tx);
-                    recv.push(rv);
-                }
-            }
-        }
-
-        for tx in send {
-            tokio::spawn(writer(msg_to_send.clone(), tx));
-        }
-        for rv in recv {
-            tokio::spawn(reader(
-                session.clone(),
-                id,
-                locator.clone(),
-                connection.clone(),
-                rv,
-            ));
-        }
+        tokio::spawn(writer(msg_to_send, send));
+        tokio::spawn(reader(session, id, locator, connection, recv));
     }
 }
 

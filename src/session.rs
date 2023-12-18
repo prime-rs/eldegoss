@@ -5,10 +5,10 @@ use std::{
     time::Duration,
 };
 
-use async_lock::{Mutex, RwLock};
 use color_eyre::{eyre::eyre, Result};
 use flume::{Receiver, Sender};
 use quinn::{ClientConfig, Connecting, Connection, Endpoint, ServerConfig, TransportConfig};
+use tokio::sync::{Mutex, RwLock};
 
 use common_x::cert::{create_any_server_name_config, read_certs, read_key};
 use tokio::select;
@@ -220,10 +220,9 @@ impl Session {
                         locator: locator.clone(),
                         connection,
                         session: self.clone(),
-                        send: vec![tx],
-                        recv: vec![rv],
+                        send: tx,
+                        recv: rv,
                         msg_to_send: recv,
-                        is_server: true,
                     };
                     let mut is_old = false;
                     if self.links.read().await.contains_key(&link.id()) {
@@ -299,10 +298,9 @@ impl Session {
                             locator: remote_address.to_string(),
                             connection,
                             session: self.clone(),
-                            send: vec![tx],
-                            recv: vec![rv],
+                            send: tx,
+                            recv: rv,
                             msg_to_send: recv,
-                            is_server: false,
                         };
                         let id = link.id();
                         tokio::spawn(link.handle());

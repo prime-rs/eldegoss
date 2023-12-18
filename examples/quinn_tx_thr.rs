@@ -15,6 +15,8 @@ async fn main() -> Result<()> {
     )?;
     let mut transport_config = TransportConfig::default();
     transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
+    transport_config.max_concurrent_uni_streams(0_u8.into());
+    transport_config.max_concurrent_bidi_streams(1_u8.into());
     server_config.transport_config(Arc::new(transport_config));
     let addr = "[::]:4722".parse::<SocketAddr>()?;
     let endpoint = Endpoint::server(server_config, addr)?;
