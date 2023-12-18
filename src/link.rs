@@ -4,7 +4,7 @@ use quinn::{Connection, RecvStream, SendStream};
 
 use crate::{
     protocol::Message,
-    server::Server,
+    session::Session,
     util::{read_msg, write_msg},
     EldegossId,
 };
@@ -17,7 +17,7 @@ pub(crate) struct Link {
     pub(crate) msg_to_send: Receiver<Vec<u8>>,
     pub(crate) send: Vec<SendStream>,
     pub(crate) recv: Vec<RecvStream>,
-    pub(crate) server: Server,
+    pub(crate) session: Session,
     pub(crate) is_server: bool,
 }
 
@@ -33,7 +33,7 @@ impl Link {
             connection,
             mut recv,
             mut send,
-            server,
+            session,
             msg_to_send,
             ..
         } = self;
@@ -62,7 +62,7 @@ impl Link {
         }
         for rv in recv {
             tokio::spawn(reader(
-                server.clone(),
+                session.clone(),
                 id,
                 locator.clone(),
                 connection.clone(),
@@ -73,7 +73,7 @@ impl Link {
 }
 
 async fn reader(
-    server: Server,
+    session: Session,
     id: EldegossId,
     locator: String,
     connection: Connection,
@@ -83,14 +83,14 @@ async fn reader(
         match read_msg(&mut recv).await {
             Ok(msg) => {
                 let id = id.to_u128();
-                server.dispatch(msg, id).await;
+                session.dispatch(msg, id).await;
             }
             Err(e) => {
                 error!("link handle recv msg failed: {e}");
                 if let Some(close_reason) = connection.close_reason() {
-                    server.connected_locators.lock().await.remove(&locator);
-                    server.links.write().await.remove(&id);
-                    server.check_member_list.lock().await.push(id);
+                    session.connected_locators.lock().await.remove(&locator);
+                    session.links.write().await.remove(&id);
+                    session.check_member_list.lock().await.push(id);
                     info!("link({id}) closed: {close_reason}");
                 }
                 break;

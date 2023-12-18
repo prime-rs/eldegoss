@@ -7,7 +7,7 @@ use quinn::{RecvStream, SendStream};
 
 use crate::{
     protocol::{decode_msg, encode_msg, Message},
-    server::config,
+    session::config,
 };
 
 #[derive(Debug)]

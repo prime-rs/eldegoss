@@ -1,4 +1,4 @@
-use eldegoss::{server::Server, Config};
+use eldegoss::{session::Session, Config};
 use tracing::info;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 29)]
@@ -16,11 +16,11 @@ async fn main() {
     };
     info!("id: {}", config.id);
 
-    let server = Server::serve(config).await;
+    let session = Session::serve(config).await;
 
     let mut stats = eldegoss::util::Stats::new(10000);
     loop {
-        let _ = server.recv_msg().await;
+        let _ = session.recv_msg().await;
         stats.increment();
     }
 }

@@ -3,14 +3,14 @@ use std::fmt::{Display, Formatter};
 use std::hash::Hash;
 
 use serde::{Deserialize, Serialize};
-use server::config;
+use session::config;
 
 #[macro_use]
 extern crate tracing as logger;
 
 pub(crate) mod link;
 pub mod protocol;
-pub mod server;
+pub mod session;
 pub mod util;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

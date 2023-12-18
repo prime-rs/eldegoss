@@ -33,7 +33,7 @@ pub fn config() -> &'static Config {
 type MsgForRecv = (Sender<Message>, Receiver<Message>);
 
 #[derive(Debug, Clone)]
-pub struct Server {
+pub struct Session {
     pub(crate) msg_for_recv: MsgForRecv,
     pub(crate) links: Arc<RwLock<HashMap<EldegossId, Sender<Vec<u8>>>>>,
     pub(crate) membership: Arc<Mutex<Membership>>,
@@ -42,7 +42,7 @@ pub struct Server {
     pub(crate) wait_for_remove_member_list: Arc<Mutex<Vec<EldegossId>>>,
 }
 
-impl Server {
+impl Session {
     fn init(config_: Config) -> Self {
         init_config(config_);
         let member = Member::new(config().id.into(), vec![]);
@@ -59,10 +59,10 @@ impl Server {
     }
 
     pub async fn serve(config: Config) -> Self {
-        let server = Self::init(config);
-        tokio::spawn(server.clone().run_server());
-        let _ = server.connect().await;
-        server
+        let session = Self::init(config);
+        tokio::spawn(session.clone().run_server());
+        let _ = session.connect().await;
+        session
     }
 
     #[inline]
@@ -112,7 +112,7 @@ impl Server {
             self.connect_to(&client_config, conn.to_string()).await.ok();
         }
 
-        let server = self.clone();
+        let session = self.clone();
         tokio::spawn(async move {
             let Config { connect, .. } = &config();
             let mut interval = tokio::time::interval(Duration::from_secs(*check_link_interval));
@@ -120,11 +120,11 @@ impl Server {
             loop {
                 interval.tick().await;
                 for conn in connect {
-                    if server.connected_locators.lock().await.contains_key(conn) {
+                    if session.connected_locators.lock().await.contains_key(conn) {
                         continue;
                     }
                     info!("reconnect to: {conn}");
-                    server
+                    session
                         .connect_to(&client_config, conn.to_string())
                         .await
                         .ok();
@@ -219,7 +219,7 @@ impl Server {
                         id: origin.into(),
                         locator: locator.clone(),
                         connection,
-                        server: self.clone(),
+                        session: self.clone(),
                         send: vec![tx],
                         recv: vec![rv],
                         msg_to_send: recv,
@@ -298,7 +298,7 @@ impl Server {
                             id: origin.into(),
                             locator: remote_address.to_string(),
                             connection,
-                            server: self.clone(),
+                            session: self.clone(),
                             send: vec![tx],
                             recv: vec![rv],
                             msg_to_send: recv,

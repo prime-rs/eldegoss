@@ -1,5 +1,5 @@
 use common_x::signal::shutdown_signal;
-use eldegoss::{protocol::Message, server::Server, Config};
+use eldegoss::{protocol::Message, session::Session, Config};
 use tokio::select;
 use tracing::info;
 
@@ -18,7 +18,7 @@ async fn main() {
     };
     info!("id: {}", config.id);
 
-    let server = Server::serve(config).await;
+    let session = Session::serve(config).await;
 
     let mut stats = eldegoss::util::Stats::new(10000);
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
@@ -27,7 +27,7 @@ async fn main() {
         select! {
             _ = interval.tick() => {
                 let msg = Message::pub_msg("topic", vec![count]);
-                server.send_msg(msg).await;
+                session.send_msg(msg).await;
                 stats.increment();
                 count += 1;
                 if count == 100 {

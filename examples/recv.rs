@@ -1,5 +1,5 @@
 use common_x::signal::shutdown_signal;
-use eldegoss::{server::Server, Config};
+use eldegoss::{session::Session, Config};
 use tokio::select;
 use tracing::info;
 
@@ -19,12 +19,12 @@ async fn main() {
     };
     info!("id: {}", config.id);
 
-    let server = Server::serve(config).await;
+    let session = Session::serve(config).await;
 
     let mut stats = eldegoss::util::Stats::new(10000);
     loop {
         select! {
-            Ok(msg) = server.recv_msg() => {
+            Ok(msg) = session.recv_msg() => {
                 info!("recv msg: {} - {}", msg.origin(), msg.topic());
                 stats.increment();
             }
