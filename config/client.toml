@@ -1,14 +1,6 @@
-db_path = "tmp/client.db"
-data_root_dir = "tmp/client"
-
-[log_config]
-max_level = "info"
-filter = "info"
-# rolling_file_path = "./logs"
-
-[network_config.Client]
-ca_path = "config/cert/ca_cert.pem"
-connect = "127.0.0.1:4721"
-server_name = "test-host"
-keep_alive_interval = 5
-check_peer_interval = 2
+listen = "[::]:0"
+connect = ["127.0.0.1:4722"]
+cert_path = "./config/cert/client_cert.pem"
+private_key_path = "./config/cert/client_key.pem"
+ca_path = "./config/cert/ca_cert.pem"
+subscription_list = ["topic"]

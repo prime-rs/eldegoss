@@ -1,20 +1,15 @@
-use eldegoss::{protocol::Message, session::Session, Config};
+use clap::Parser;
+use color_eyre::Result;
+use eldegoss::{protocol::Message, session::Session, util::Args, Config};
 use tracing::info;
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 29)]
-async fn main() {
+#[tokio::main(flavor = "multi_thread", worker_threads = 30)]
+async fn main() -> Result<()> {
     common_x::log::init_log_filter("info");
+    let args = Args::parse();
+    let config: Config = common_x::configure::file_config(&args.config)?;
 
-    let config = Config {
-        id: 2,
-        listen: "[::]:4722".to_string(),
-        cert_path: "./config/cert/client_cert.pem".into(),
-        private_key_path: "./config/cert/client_key.pem".into(),
-        ca_path: "./config/cert/ca_cert.pem".into(),
-        subscription_list: vec!["topic".to_owned()],
-        ..Default::default()
-    };
-    info!("id: {}", config.id);
+    info!("id: {:#?}", config);
 
     let session = Session::serve(config).await;
 

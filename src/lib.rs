@@ -3,7 +3,8 @@ use std::fmt::{Display, Formatter};
 use std::hash::Hash;
 
 use serde::{Deserialize, Serialize};
-use session::config;
+
+use crate::session::id_u128;
 
 #[macro_use]
 extern crate tracing as logger;
@@ -21,8 +22,16 @@ impl EldegossId {
     pub fn rand() -> Self {
         Self(uhlc::ID::rand())
     }
+
+    #[inline]
     pub fn to_u128(&self) -> u128 {
         u128::from_le_bytes(self.0.to_le_bytes())
+    }
+
+    #[inline]
+    pub fn hex(&self) -> String {
+        let bytes = self.to_u128().to_be_bytes();
+        hex::encode(bytes)
     }
 }
 
@@ -34,7 +43,7 @@ impl Default for EldegossId {
 
 impl Display for EldegossId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "EldegossId({:x})", self.to_u128())
+        write!(f, "EldegossId({})", self.hex())
     }
 }
 
@@ -50,11 +59,45 @@ impl From<u128> for EldegossId {
     }
 }
 
+impl From<&str> for EldegossId {
+    fn from(id: &str) -> Self {
+        let id = hex::decode(id).unwrap();
+        let id = u128::from_be_bytes(id[..16].try_into().unwrap());
+        id.into()
+    }
+}
+
+impl From<String> for EldegossId {
+    fn from(id: String) -> Self {
+        id.as_str().into()
+    }
+}
+
+impl From<&String> for EldegossId {
+    fn from(id: &String) -> Self {
+        id.as_str().into()
+    }
+}
+
+#[test]
+fn test_id() {
+    let id1 = EldegossId::from("00000000000000000000000000000001");
+    let id2 = EldegossId::from(1);
+    assert_eq!(id1, id2);
+    let id1 = EldegossId::from("10000000000000000000000000000000");
+    let id2 = EldegossId::from(21267647932558653966460912964485513216);
+    assert_eq!(id1, id2);
+    let id = EldegossId::rand();
+    println!("{}", id);
+    println!("hex: {}", id.hex());
+    println!("u128: {}", id.to_u128());
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(default)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    pub id: u128,
+    pub id: String,
 
     pub listen: String,
     pub connect: Vec<String>,
@@ -75,7 +118,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            id: rand::random(),
+            id: Into::<EldegossId>::into(rand::random::<u128>()).hex(),
             ca_path: Default::default(),
             connect: Default::default(),
             listen: Default::default(),
@@ -130,7 +173,7 @@ impl Membership {
     }
 
     pub fn remove_member(&mut self, id: EldegossId) {
-        if config().id == id.to_u128() {
+        if id_u128() == id.to_u128() {
             info!("cant remove self");
             return;
         }

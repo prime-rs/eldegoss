@@ -51,7 +51,7 @@ async fn reader(
                 session.dispatch(msg, id).await;
             }
             Err(e) => {
-                error!("link handle recv msg failed: {e}");
+                warn!("link handle recv msg failed: {e}");
                 if let Some(close_reason) = connection.close_reason() {
                     session.connected_locators.lock().await.remove(&locator);
                     session.links.write().await.remove(&id);

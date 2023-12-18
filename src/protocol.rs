@@ -96,6 +96,7 @@ impl Message {
         })
     }
 
+    #[inline]
     pub const fn origin(&self) -> u128 {
         match self {
             Message::EldegossMsg(msg) => msg.origin,
@@ -104,6 +105,7 @@ impl Message {
         }
     }
 
+    #[inline]
     pub const fn to(&self) -> u128 {
         match self {
             Message::EldegossMsg(msg) => msg.to,
@@ -112,6 +114,7 @@ impl Message {
         }
     }
 
+    #[inline]
     pub fn topic(&self) -> String {
         match self {
             Message::EldegossMsg(_) => "".to_owned(),
@@ -120,6 +123,7 @@ impl Message {
         }
     }
 
+    #[inline]
     pub fn set_origin(&mut self, origin: u128) {
         match self {
             Message::EldegossMsg(msg) => msg.origin = origin,
@@ -128,6 +132,7 @@ impl Message {
         }
     }
 
+    #[inline]
     pub fn set_to(&mut self, to: u128) {
         match self {
             Message::EldegossMsg(msg) => msg.to = to,

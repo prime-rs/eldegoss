@@ -5,7 +5,7 @@ use color_eyre::Result;
 use common_x::cert::{read_certs, read_key};
 use quinn::{Endpoint, ServerConfig, TransportConfig};
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 15)]
+#[tokio::main(flavor = "multi_thread", worker_threads = 30)]
 async fn main() -> Result<()> {
     common_x::log::init_log_filter("info");
 

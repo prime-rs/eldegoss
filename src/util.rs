@@ -1,14 +1,22 @@
 use std::future::Future;
 use std::time::Instant;
 
+use clap::Parser;
 use color_eyre::Result;
 use futures::stream::{FuturesUnordered, StreamExt};
 use quinn::{RecvStream, SendStream};
 
 use crate::{
     protocol::{decode_msg, encode_msg, Message},
-    session::config,
+    session::id_u128,
 };
+
+#[derive(Parser, Debug, Clone)]
+#[command(author, version, about, long_about = None)]
+pub struct Args {
+    #[arg(short, long, default_value = "config/client.toml")]
+    pub config: String,
+}
 
 #[derive(Debug)]
 pub struct Stats {
@@ -66,7 +74,7 @@ pub async fn read_msg(recv: &mut RecvStream) -> Result<Message> {
     recv.read_exact(&mut length).await?;
     let n = u32::from_le_bytes(length) as usize;
     if n == 0 {
-        error!("read 0 bytes");
+        warn!("read 0 bytes");
         return Ok(Message::None);
     }
     let bytes = &mut vec![0_u8; n];
@@ -76,7 +84,7 @@ pub async fn read_msg(recv: &mut RecvStream) -> Result<Message> {
 
 #[inline]
 pub async fn write_msg(send: &mut SendStream, mut msg: Message) -> Result<()> {
-    msg.set_origin(config().id);
+    msg.set_origin(id_u128());
     let mut msg_bytes = encode_msg(&msg);
     let mut bytes = (msg_bytes.len() as u32).to_le_bytes().to_vec();
     bytes.append(&mut msg_bytes);

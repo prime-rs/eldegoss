@@ -1,15 +1,6 @@
-id = 10
-db_path = "tmp/server.db"
-data_root_dir = "tmp/server"
-
-[log_config]
-max_level = "info"
-filter = "info"
-# rolling_file_path = "./logs"
-
-[network_config.Server]
-port =  4721
-cert_path =  "config/cert/server_cert.pem"
-key_path = "config/cert/server_key.pem"
-keep_alive_interval = 5
-check_peer_interval = 2
+id = "00000000000000000000000000000001"
+listen = "[::]:4722"
+cert_path = "./config/cert/client_cert.pem"
+private_key_path = "./config/cert/client_key.pem"
+ca_path = "./config/cert/ca_cert.pem"
+subscription_list = ["topic"]

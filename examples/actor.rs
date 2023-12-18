@@ -1,5 +1,5 @@
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
-use tracing::{error, info};
+use tracing::{info, warn};
 
 pub enum MyFirstActorMessage {
     PrintHelloWorld,
@@ -35,7 +35,7 @@ impl Actor for MyFirstActor {
             }
             MyFirstActorMessage::HowManyHelloWorlds(reply) => {
                 if reply.send(*state).is_err() {
-                    error!("Listener dropped their port before we could reply");
+                    warn!("Listener dropped their port before we could reply");
                 }
             }
         }

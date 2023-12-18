@@ -21,13 +21,20 @@ use crate::{
 };
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
+static ID: OnceLock<u128> = OnceLock::new();
 
 fn init_config(config: Config) {
-    CONFIG.set(config).unwrap()
+    let id = EldegossId::from(&config.id);
+    ID.set(id.to_u128()).unwrap();
+    CONFIG.set(config).unwrap();
 }
 
 pub fn config() -> &'static Config {
     CONFIG.get_or_init(Config::default)
+}
+
+pub fn id_u128() -> u128 {
+    *ID.get_or_init(Default::default)
 }
 
 type MsgForRecv = (Sender<Message>, Receiver<Message>);
@@ -45,11 +52,11 @@ pub struct Session {
 impl Session {
     fn init(config_: Config) -> Self {
         init_config(config_);
-        let member = Member::new(config().id.into(), vec![]);
+        let member = Member::new(id_u128().into(), vec![]);
         let mut membership = Membership::default();
         membership.add_member(member);
         Self {
-            msg_for_recv: flume::unbounded(),
+            msg_for_recv: flume::bounded(1024 * 100 * 4),
             links: Default::default(),
             membership: Arc::new(Mutex::new(membership)),
             connected_locators: Default::default(),
@@ -72,7 +79,7 @@ impl Session {
 
     #[inline]
     pub async fn send_msg(&self, mut msg: Message) {
-        msg.set_origin(config().id);
+        msg.set_origin(id_u128());
         if msg.to() != 0 {
             if let Some(link) = self.links.read().await.get(&msg.to().into()) {
                 let _ = link.send_timeout(encode_msg(&msg), Duration::from_secs(1));
@@ -214,7 +221,7 @@ impl Session {
                         self.membership.lock().await.merge(&membership);
                     }
 
-                    let (send, recv) = flume::bounded(500000);
+                    let (send, recv) = flume::bounded(1024 * 100 * 4);
                     let link = Link {
                         id: origin.into(),
                         locator: locator.clone(),
@@ -292,7 +299,7 @@ impl Session {
                         self.send_msg(Message::eldegoss(0, EldegossMsgBody::AddMember(member)))
                             .await;
 
-                        let (send, recv) = flume::bounded(500000);
+                        let (send, recv) = flume::bounded(1024 * 100 * 4);
                         let link = Link {
                             id: origin.into(),
                             locator: remote_address.to_string(),
@@ -362,7 +369,7 @@ impl Session {
                 }
             }
             (to, "") => {
-                if to == config().id {
+                if to == id_u128() {
                     self.handle_recv_msg(msg).await;
                 } else if let Some(link) = self.links.read().await.get(&to.into()) {
                     let _ = link.send_timeout(encode_msg(&msg), Duration::from_secs(1));
@@ -371,7 +378,7 @@ impl Session {
                 }
             }
             (to, topic) => {
-                if to == config().id {
+                if to == id_u128() {
                     if config().subscription_list.contains(&topic.to_owned()) {
                         self.to_recv_msg(msg).await;
                     }
@@ -401,7 +408,7 @@ impl Session {
                 body: EldegossMsgBody::CheckReq(check_id),
                 ..
             }) => {
-                let result = config().id == *check_id
+                let result = id_u128() == *check_id
                     || self.links.read().await.contains_key(&(*check_id).into());
                 debug!("check member: {} result: {}", check_id, result);
                 let msg = Message::eldegoss(0, EldegossMsgBody::CheckRsp(*check_id, result));
@@ -427,8 +434,7 @@ impl Session {
 
     #[inline]
     async fn gossip_msg(&self, msg: &Message, received_from: u128) {
-        if self.links.read().await.is_empty() || (received_from != 0 && msg.origin() == config().id)
-        {
+        if self.links.read().await.is_empty() || (received_from != 0 && msg.origin() == id_u128()) {
             return;
         }
         let links = self
@@ -448,7 +454,7 @@ impl Session {
             .collect::<Vec<_>>();
 
         for link in links {
-            let _ = link.1.send(encode_msg(msg)).ok();
+            let _ = link.1.send_async(encode_msg(msg)).await.ok();
         }
     }
 
