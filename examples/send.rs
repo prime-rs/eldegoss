@@ -1,7 +1,7 @@
 use clap::Parser;
 use color_eyre::Result;
 use common_x::signal::shutdown_signal;
-use eldegoss::{protocol::Message, session::Session, util::Args, Config};
+use eldegoss::{config::Config, protocol::Message, session::Session, util::Args};
 use tokio::select;
 use tracing::info;
 

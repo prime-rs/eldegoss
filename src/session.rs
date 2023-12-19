@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::SocketAddr,
     sync::{Arc, OnceLock},
     time::Duration,
@@ -14,10 +14,11 @@ use common_x::cert::{create_any_server_name_config, read_certs, read_key};
 use tokio::select;
 
 use crate::{
+    config::Config,
     link::Link,
     protocol::{encode_msg, EldegossMsg, EldegossMsgBody, Message},
     util::{read_msg, write_msg},
-    Config, EldegossId, Member, Membership,
+    EldegossId, Member, Membership,
 };
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -44,7 +45,7 @@ pub struct Session {
     pub(crate) msg_for_recv: MsgForRecv,
     pub(crate) links: Arc<RwLock<HashMap<EldegossId, Sender<Vec<u8>>>>>,
     pub(crate) membership: Arc<Mutex<Membership>>,
-    pub(crate) connected_locators: Arc<Mutex<HashMap<String, u128>>>,
+    pub(crate) connected_locators: Arc<Mutex<HashSet<String>>>,
     pub(crate) check_member_list: Arc<Mutex<Vec<EldegossId>>>,
     pub(crate) wait_for_remove_member_list: Arc<Mutex<Vec<EldegossId>>>,
 }
@@ -113,7 +114,7 @@ impl Session {
         client_config.transport_config(Arc::new(transport_config));
 
         for conn in connect {
-            if self.connected_locators.lock().await.contains_key(conn) {
+            if self.connected_locators.lock().await.contains(conn) {
                 continue;
             }
             self.connect_to(&client_config, conn.to_string()).await.ok();
@@ -127,7 +128,7 @@ impl Session {
             loop {
                 interval.tick().await;
                 for conn in connect {
-                    if session.connected_locators.lock().await.contains_key(conn) {
+                    if session.connected_locators.lock().await.contains(conn) {
                         continue;
                     }
                     info!("reconnect to: {conn}");
@@ -234,7 +235,7 @@ impl Session {
                     let mut is_old = false;
                     if self.links.read().await.contains_key(&link.id()) {
                         info!("update link({}): {remote_address}", origin);
-                        self.connected_locators.lock().await.insert(locator.clone(), origin);
+                        self.connected_locators.lock().await.insert(locator.clone());
                         is_old = true;
                     }
                     if !is_old {
@@ -343,10 +344,7 @@ impl Session {
             .await
             .retain(|x| x.to_u128() != id_u128);
 
-        self.connected_locators
-            .lock()
-            .await
-            .insert(locator, id_u128);
+        self.connected_locators.lock().await.insert(locator);
         self.links.write().await.insert(id, link);
     }
 

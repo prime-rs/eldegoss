@@ -9,6 +9,7 @@ use crate::session::id_u128;
 #[macro_use]
 extern crate tracing as logger;
 
+pub mod config;
 pub(crate) mod link;
 pub mod protocol;
 pub mod session;
@@ -16,21 +17,21 @@ pub mod util;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[repr(transparent)]
-pub struct EldegossId(uhlc::ID);
+pub struct EldegossId(u128);
 
 impl EldegossId {
     pub fn rand() -> Self {
-        Self(uhlc::ID::rand())
+        Self(u128::from_le_bytes(uhlc::ID::rand().to_le_bytes()))
     }
 
     #[inline]
-    pub fn to_u128(&self) -> u128 {
-        u128::from_le_bytes(self.0.to_le_bytes())
+    pub const fn to_u128(&self) -> u128 {
+        self.0
     }
 
     #[inline]
     pub fn hex(&self) -> String {
-        let bytes = self.to_u128().to_be_bytes();
+        let bytes = self.0.to_be_bytes();
         hex::encode(bytes)
     }
 }
@@ -49,7 +50,7 @@ impl Display for EldegossId {
 
 impl From<uhlc::ID> for EldegossId {
     fn from(id: uhlc::ID) -> Self {
-        Self(id)
+        Self(u128::from_le_bytes(id.to_le_bytes()))
     }
 }
 
@@ -91,46 +92,6 @@ fn test_id() {
     println!("{}", id);
     println!("hex: {}", id.hex());
     println!("u128: {}", id.to_u128());
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(default)]
-#[serde(deny_unknown_fields)]
-pub struct Config {
-    pub id: String,
-
-    pub listen: String,
-    pub connect: Vec<String>,
-
-    pub ca_path: String,
-    pub cert_path: String,
-    pub private_key_path: String,
-
-    pub subscription_list: Vec<String>,
-
-    pub keep_alive_interval: u64,
-    pub check_link_interval: u64,
-    pub msg_timeout: u64,
-
-    pub gossip_fanout: usize,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            id: Into::<EldegossId>::into(rand::random::<u128>()).hex(),
-            ca_path: Default::default(),
-            connect: Default::default(),
-            listen: Default::default(),
-            cert_path: Default::default(),
-            private_key_path: Default::default(),
-            subscription_list: Default::default(),
-            keep_alive_interval: 5,
-            check_link_interval: 1,
-            msg_timeout: 2,
-            gossip_fanout: 3,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

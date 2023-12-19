@@ -1,6 +1,6 @@
 use clap::Parser;
 use color_eyre::Result;
-use eldegoss::{session::Session, util::Args, Config};
+use eldegoss::{config::Config, session::Session, util::Args};
 use tracing::info;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 30)]
