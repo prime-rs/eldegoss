@@ -85,9 +85,9 @@ pub async fn read_msg(recv: &mut RecvStream) -> Result<Message> {
 #[inline]
 pub async fn write_msg(send: &mut SendStream, mut msg: Message) -> Result<()> {
     msg.set_origin(id_u128());
-    let mut msg_bytes = encode_msg(&msg);
-    let mut bytes = (msg_bytes.len() as u32).to_le_bytes().to_vec();
-    bytes.append(&mut msg_bytes);
+    let msg_bytes = encode_msg(&msg);
+    let len_bytes = (msg_bytes.len() as u32).to_le_bytes().to_vec();
+    let bytes = [len_bytes, msg_bytes].concat();
     send.write_all(&bytes).await?;
     Ok(())
 }
