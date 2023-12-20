@@ -30,11 +30,8 @@ async fn main() -> Result<()> {
 
     let mut stats = eldegoss::util::Stats::new(10000);
 
+    let bytes = &mut vec![0_u8; 1028];
     loop {
-        let mut length = [0_u8, 0_u8, 0_u8, 0_u8];
-        rv.read_exact(&mut length).await?;
-        let n = u32::from_le_bytes(length) as usize;
-        let bytes = &mut vec![0_u8; n];
         rv.read_exact(bytes).await?;
         stats.increment();
     }

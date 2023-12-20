@@ -86,7 +86,7 @@ impl Session {
             let mut links = self.links.write().await;
             if let Some(link) = links.get(&to.into()) {
                 if link
-                    .send_timeout(encode_msg(&msg), Duration::from_millis(100))
+                    .send_timeout(encode_msg(&msg), Duration::from_secs(1))
                     .is_err()
                 {
                     links.remove(&to.into());
@@ -383,7 +383,7 @@ impl Session {
                     let mut links = self.links.write().await;
                     if let Some(link) = links.get(&to.into()) {
                         if link
-                            .send_timeout(encode_msg(&msg), Duration::from_millis(100))
+                            .send_timeout(encode_msg(&msg), Duration::from_secs(1))
                             .is_err()
                         {
                             links.remove(&to.into());
@@ -471,10 +471,11 @@ impl Session {
             .clone()
             .collect::<Vec<_>>();
 
+        let bytes = encode_msg(msg);
         for link in links {
             if link
                 .1
-                .send_timeout(encode_msg(msg), Duration::from_millis(100))
+                .send_timeout(bytes.clone(), Duration::from_secs(1))
                 .is_err()
             {
                 self.links.write().await.remove(&link.0);

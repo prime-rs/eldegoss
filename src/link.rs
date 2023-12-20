@@ -66,9 +66,8 @@ async fn writer(msg_to_send: Receiver<Vec<u8>>, mut send: SendStream) -> Result<
     while let Ok(msg_bytes) = msg_to_send.recv_async().await {
         let len = msg_bytes.len() as u32;
         let len_bytes = len.to_le_bytes().to_vec();
-        send.write_all(&len_bytes).await?;
-        send.write_all(&msg_bytes).await?;
+        let bytes = [len_bytes, msg_bytes].concat();
+        send.write_all(&bytes).await?;
     }
-    send.finish().await?;
     Ok(())
 }

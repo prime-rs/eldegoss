@@ -28,10 +28,10 @@ async fn main() -> Result<()> {
 
     let mut stats = eldegoss::util::Stats::new(10000);
 
+    let msg_bytes = vec![0; 1024];
+    let bytes = (msg_bytes.len() as u32).to_le_bytes().to_vec();
+    let bytes = [bytes, msg_bytes].concat();
     loop {
-        let msg_bytes = vec![0; 1024];
-        let bytes = (msg_bytes.len() as u32).to_le_bytes().to_vec();
-        let bytes = [bytes, msg_bytes].concat();
         tx.write_all(&bytes).await?;
         stats.increment();
     }
