@@ -11,7 +11,7 @@ fn main() {
     info!("bytes len: {:?}", bytes.len());
     let mut stats = Stats::new(1000);
     for _ in 0..10000 {
-        let _ = decode_msg(&bytes);
+        decode_msg(&bytes).ok();
         stats.increment();
     }
 }

@@ -11,7 +11,7 @@ fn main() {
     let bytes = encode_msg(&msg);
     info!("bytes len: {:?}", bytes.len());
     for _ in 0..10000 {
-        let _ = encode_msg(&msg);
+        encode_msg(&msg);
         stats.increment();
     }
 }

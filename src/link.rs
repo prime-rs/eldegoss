@@ -29,7 +29,6 @@ impl Link {
             send,
             session,
             msg_to_send,
-            ..
         } = self;
 
         tokio::spawn(writer(msg_to_send, send));
@@ -52,12 +51,11 @@ async fn reader(
             }
             Err(e) => {
                 warn!("link handle recv msg failed: {e}");
-                if let Some(close_reason) = connection.close_reason() {
-                    session.connected_locators.lock().await.remove(&locator);
-                    session.links.write().await.remove(&id);
-                    session.check_member_list.lock().await.push(id);
-                    info!("link({id}) closed: {close_reason}");
-                }
+                session.connected_locators.lock().await.remove(&locator);
+                session.links.write().await.remove(&id);
+                session.check_member_list.lock().await.push(id);
+                warn!("link({id}) closed: {:?}", connection.close_reason());
+                connection.close(0u32.into(), b"close");
                 break;
             }
         }
@@ -71,5 +69,6 @@ async fn writer(msg_to_send: Receiver<Vec<u8>>, mut send: SendStream) -> Result<
         send.write_all(&len_bytes).await?;
         send.write_all(&msg_bytes).await?;
     }
+    send.finish().await?;
     Ok(())
 }

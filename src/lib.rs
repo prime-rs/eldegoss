@@ -56,7 +56,10 @@ impl From<uhlc::ID> for EldegossId {
 
 impl From<u128> for EldegossId {
     fn from(id: u128) -> Self {
-        uhlc::ID::try_from(id).unwrap().into()
+        if id == 0 {
+            panic!("id can't be 0")
+        }
+        Self(id)
     }
 }
 

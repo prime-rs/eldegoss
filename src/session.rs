@@ -57,7 +57,7 @@ impl Session {
         let mut membership = Membership::default();
         membership.add_member(member);
         Self {
-            msg_for_recv: flume::bounded(1024 * 100 * 4),
+            msg_for_recv: flume::bounded(1024),
             links: Default::default(),
             membership: Arc::new(Mutex::new(membership)),
             connected_locators: Default::default(),
@@ -69,7 +69,7 @@ impl Session {
     pub async fn serve(config: Config) -> Self {
         let session = Self::init(config);
         tokio::spawn(session.clone().run_server());
-        let _ = session.connect().await;
+        session.connect().await.ok();
         session
     }
 
@@ -81,10 +81,18 @@ impl Session {
     #[inline]
     pub async fn send_msg(&self, mut msg: Message) {
         msg.set_origin(id_u128());
-        if msg.to() != 0 {
-            if let Some(link) = self.links.read().await.get(&msg.to().into()) {
-                let _ = link.send_timeout(encode_msg(&msg), Duration::from_secs(1));
-                return;
+        let to = msg.to();
+        if to != 0 {
+            let mut links = self.links.write().await;
+            if let Some(link) = links.get(&to.into()) {
+                if link
+                    .send_timeout(encode_msg(&msg), Duration::from_millis(100))
+                    .is_err()
+                {
+                    links.remove(&to.into());
+                } else {
+                    return;
+                }
             }
         }
         self.gossip_msg(&msg, 0).await;
@@ -153,7 +161,7 @@ impl Session {
             .unwrap()
             .await
         {
-            let _ = self.join(connection, connect).await;
+            self.join(connection, connect).await.ok();
         }
         Ok(())
     }
@@ -203,14 +211,14 @@ impl Session {
                 Err(eyre!("join request timeout: {remote_address}"))
             }
             Ok((mut tx, mut rv)) = connection.open_bi() => {
-                let _ = write_msg(
+                write_msg(
                     &mut tx,
                     Message::eldegoss(
                         0,
                         EldegossMsgBody::JoinReq(vec![]),
                     ),
                 )
-                .await;
+                .await.ok();
                 let msg = read_msg(&mut rv).await?;
                 if let Message::EldegossMsg(EldegossMsg {
                     origin,
@@ -222,7 +230,7 @@ impl Session {
                         self.membership.lock().await.merge(&membership);
                     }
 
-                    let (send, recv) = flume::bounded(1024 * 100 * 4);
+                    let (send, recv) = flume::bounded(1024);
                     let link = Link {
                         id: origin.into(),
                         locator: locator.clone(),
@@ -286,11 +294,12 @@ impl Session {
                         let membership = self.membership.lock().await.clone();
                         debug!("memberlist: {membership:#?}");
 
-                        let _ = write_msg(
+                        write_msg(
                             &mut tx,
                             Message::eldegoss(0, EldegossMsgBody::JoinRsp(membership)),
                         )
-                        .await;
+                        .await
+                        .ok();
 
                         let member = Member::new(origin.into(), meta_data);
                         {
@@ -300,7 +309,7 @@ impl Session {
                         self.send_msg(Message::eldegoss(0, EldegossMsgBody::AddMember(member)))
                             .await;
 
-                        let (send, recv) = flume::bounded(1024 * 100 * 4);
+                        let (send, recv) = flume::bounded(1024);
                         let link = Link {
                             id: origin.into(),
                             locator: remote_address.to_string(),
@@ -369,10 +378,21 @@ impl Session {
             (to, "") => {
                 if to == id_u128() {
                     self.handle_recv_msg(msg).await;
-                } else if let Some(link) = self.links.read().await.get(&to.into()) {
-                    let _ = link.send_timeout(encode_msg(&msg), Duration::from_secs(1));
                 } else {
-                    self.gossip_msg(&msg, received_from).await;
+                    let mut send_err = false;
+                    let mut links = self.links.write().await;
+                    if let Some(link) = links.get(&to.into()) {
+                        if link
+                            .send_timeout(encode_msg(&msg), Duration::from_millis(100))
+                            .is_err()
+                        {
+                            links.remove(&to.into());
+                            send_err = true;
+                        }
+                    }
+                    if send_err {
+                        self.gossip_msg(&msg, received_from).await;
+                    }
                 }
             }
             (to, topic) => {
@@ -452,7 +472,13 @@ impl Session {
             .collect::<Vec<_>>();
 
         for link in links {
-            let _ = link.1.send_async(encode_msg(msg)).await.ok();
+            if link
+                .1
+                .send_timeout(encode_msg(msg), Duration::from_millis(100))
+                .is_err()
+            {
+                self.links.write().await.remove(&link.0);
+            }
         }
     }
 
