@@ -23,7 +23,7 @@ async fn main() -> Result<()> {
 
     tokio::spawn(Session::serve(config, rv, callback));
 
-    let mut stats = eldegoss::util::Stats::new(10000);
+    let mut stats = eldegoss::util::Stats::new(100000);
     loop {
         let msg = Message::put("topic", vec![0; 1024]);
         tx.send_async(msg).await.ok();

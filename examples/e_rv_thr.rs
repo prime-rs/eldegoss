@@ -17,7 +17,7 @@ async fn main() -> Result<()> {
 
     let (_, rv) = flume::bounded(1024 * 1024);
 
-    let mut stats = eldegoss::util::Stats::new(10000);
+    let mut stats = eldegoss::util::Stats::new(100000);
     let callback = vec![Subscriber::new("topic", move |_msg| {
         stats.increment();
     })];
