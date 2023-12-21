@@ -7,7 +7,7 @@ readme = "README.md"
 repository = "https://github.com/JLerxky/eldegoss"
 license = "Apache-2.0"
 authors = ["JLer <jlerxky@live.com>"]
-categories = ["network"]
+categories = ["network-programming"]
 keywords = ["network", "p2p", "gossip", "SWIM"]
 
 [features]
