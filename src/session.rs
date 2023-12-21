@@ -16,7 +16,7 @@ use tokio::select;
 use crate::{
     config::Config,
     link::Link,
-    protocol::{EldegossMsg, EldegossMsgBody, Message, Sample},
+    protocol::{Command, Control, Message, Sample},
     util::{read_msg, write_msg},
     EldegossId, Member, Membership,
 };
@@ -225,16 +225,16 @@ impl Session {
             Ok((mut tx, mut rv)) = connection.open_bi() => {
                 write_msg(
                     &mut tx,
-                    Sample::eldegoss(
+                    Sample::control(
                         0,
-                        EldegossMsgBody::JoinReq(vec![]),
+                        Command::JoinReq(vec![]),
                     ),
                 )
                 .await.ok();
                 let msg = read_msg(&mut rv).await?;
-                if let Sample::EldegossMsg(EldegossMsg {
+                if let Sample::Control(Control {
                     origin,
-                    body: EldegossMsgBody::JoinRsp(membership),
+                    command: Command::JoinRsp(membership),
                     ..
                 }) = msg
                 {
@@ -281,9 +281,9 @@ impl Session {
                 if let Ok((mut tx, mut rv)) = connection.accept_bi().await {
                     let msg = read_msg(&mut rv).await?;
 
-                    if let Sample::EldegossMsg(EldegossMsg {
+                    if let Sample::Control(Control {
                         origin,
-                        body: EldegossMsgBody::JoinReq(meta_data),
+                        command: Command::JoinReq(meta_data),
                         ..
                     }) = msg
                     {
@@ -306,19 +306,16 @@ impl Session {
                         let membership = self.membership.lock().await.clone();
                         debug!("memberlist: {membership:#?}");
 
-                        write_msg(
-                            &mut tx,
-                            Sample::eldegoss(0, EldegossMsgBody::JoinRsp(membership)),
-                        )
-                        .await
-                        .ok();
+                        write_msg(&mut tx, Sample::control(0, Command::JoinRsp(membership)))
+                            .await
+                            .ok();
 
                         let member = Member::new(origin.into(), meta_data);
                         {
                             self.membership.lock().await.add_member(member.clone());
                         }
 
-                        self.send_msg(Sample::eldegoss(0, EldegossMsgBody::AddMember(member)))
+                        self.send_msg(Sample::control(0, Command::AddMember(member)))
                             .await;
 
                         let (send, recv) = flume::bounded(1024);
@@ -419,30 +416,30 @@ impl Session {
     #[inline]
     async fn handle_recv_msg(&self, msg: Sample) {
         match &msg {
-            Sample::EldegossMsg(EldegossMsg {
-                body: EldegossMsgBody::AddMember(member),
+            Sample::Control(Control {
+                command: Command::AddMember(member),
                 ..
             }) => {
                 self.membership.lock().await.add_member(member.clone());
             }
-            Sample::EldegossMsg(EldegossMsg {
-                body: EldegossMsgBody::RemoveMember(id),
+            Sample::Control(Control {
+                command: Command::RemoveMember(id),
                 ..
             }) => {
                 self.membership.lock().await.remove_member((*id).into());
             }
-            Sample::EldegossMsg(EldegossMsg {
-                body: EldegossMsgBody::CheckReq(check_id),
+            Sample::Control(Control {
+                command: Command::CheckReq(check_id),
                 ..
             }) => {
                 let result = id_u128() == *check_id
                     || self.links.read().await.contains_key(&(*check_id).into());
                 debug!("check member: {} result: {}", check_id, result);
-                let msg = Sample::eldegoss(0, EldegossMsgBody::CheckRsp(*check_id, result));
+                let msg = Sample::control(0, Command::CheckRsp(*check_id, result));
                 self.send_msg(msg).await;
             }
-            Sample::EldegossMsg(EldegossMsg {
-                body: EldegossMsgBody::CheckRsp(id, result),
+            Sample::Control(Control {
+                command: Command::CheckRsp(id, result),
                 ..
             }) => {
                 debug!("recv check member: {} result: {}", id, result);
@@ -505,9 +502,9 @@ impl Session {
             }
 
             for remove_id in remove_ids {
-                self.send_msg(Sample::eldegoss(
+                self.send_msg(Sample::control(
                     0,
-                    EldegossMsgBody::RemoveMember(remove_id.to_u128()),
+                    Command::RemoveMember(remove_id.to_u128()),
                 ))
                 .await;
             }
@@ -524,11 +521,8 @@ impl Session {
                 };
                 if let Some(check_id) = check_id {
                     info!("check member: {}", check_id);
-                    self.send_msg(Sample::eldegoss(
-                        0,
-                        EldegossMsgBody::CheckReq(check_id.to_u128()),
-                    ))
-                    .await;
+                    self.send_msg(Sample::control(0, Command::CheckReq(check_id.to_u128())))
+                        .await;
                 } else {
                     break;
                 }
