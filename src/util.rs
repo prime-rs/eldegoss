@@ -2,11 +2,11 @@ use std::future::Future;
 use std::time::Instant;
 
 use clap::Parser;
-use color_eyre::Result;
+use color_eyre::{eyre::eyre, Result};
 use futures::stream::{FuturesUnordered, StreamExt};
 use quinn::{RecvStream, SendStream};
 
-use crate::{protocol::Message, session::id_u128};
+use crate::{protocol::Sample, session::id_u128};
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -66,21 +66,21 @@ impl Drop for Stats {
 }
 
 #[inline]
-pub async fn read_msg(recv: &mut RecvStream) -> Result<Message> {
+pub(crate) async fn read_msg(recv: &mut RecvStream) -> Result<Sample> {
     let mut length = [0_u8, 0_u8, 0_u8, 0_u8];
     recv.read_exact(&mut length).await?;
     let n = u32::from_le_bytes(length) as usize;
     if n == 0 {
         warn!("read 0 bytes");
-        return Ok(Message::None);
+        return Err(eyre!("read 0 bytes"));
     }
     let bytes = &mut vec![0_u8; n];
     recv.read_exact(bytes).await?;
-    Message::decode(bytes)
+    Sample::decode(bytes)
 }
 
 #[inline]
-pub async fn write_msg(send: &mut SendStream, mut msg: Message) -> Result<()> {
+pub(crate) async fn write_msg(send: &mut SendStream, mut msg: Sample) -> Result<()> {
     msg.set_origin(id_u128());
     let msg_bytes = msg.encode();
     let len_bytes = (msg_bytes.len() as u32).to_le_bytes().to_vec();

@@ -4,14 +4,14 @@ use std::{
 };
 
 use bitflags::bitflags;
-use color_eyre::{eyre::Ok, Result};
+use color_eyre::{eyre::eyre, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::{Member, Membership};
 
 bitflags! {
     #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct Flags: u8 {
+    pub(crate) struct Flags: u8 {
         const Eldegoss = 0b10000000;
         const Broadcast = 0b01000000;
         const PubSub = 0b00100000;
@@ -37,7 +37,7 @@ impl FromStr for Flags {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub enum EldegossMsgBody {
+pub(crate) enum EldegossMsgBody {
     AddMember(Member),
     RemoveMember(u128),
     JoinReq(Vec<u8>),
@@ -47,29 +47,60 @@ pub enum EldegossMsgBody {
 }
 
 #[derive(Debug)]
-pub struct EldegossMsg {
+pub(crate) struct EldegossMsg {
     pub origin: u128,
     pub to: u128,
     pub body: EldegossMsgBody,
 }
 
 #[derive(Debug, Default)]
-pub struct Msg {
+pub struct Message {
     pub origin: u128,
     pub to: u128,
     pub topic: String,
     pub body: Vec<u8>,
 }
 
-#[derive(Debug)]
-pub enum Message {
-    EldegossMsg(EldegossMsg),
-    Msg(Msg),
-    None,
+impl Message {
+    pub fn new(to: u128, topic: &str, body: Vec<u8>) -> Self {
+        Self {
+            to,
+            topic: topic.to_owned(),
+            body,
+            ..Default::default()
+        }
+    }
+
+    pub fn to(to: u128, body: Vec<u8>) -> Self {
+        Self {
+            to,
+            body,
+            ..Default::default()
+        }
+    }
+
+    pub fn put(topic: &str, body: Vec<u8>) -> Self {
+        Self {
+            topic: topic.to_owned(),
+            body,
+            ..Default::default()
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn sample(self) -> Sample {
+        Sample::Message(self)
+    }
 }
 
-impl Message {
-    pub const fn eldegoss(to: u128, body: EldegossMsgBody) -> Self {
+#[derive(Debug)]
+pub(crate) enum Sample {
+    EldegossMsg(EldegossMsg),
+    Message(Message),
+}
+
+impl Sample {
+    pub(crate) const fn eldegoss(to: u128, body: EldegossMsgBody) -> Self {
         Self::EldegossMsg(EldegossMsg {
             origin: 0,
             to,
@@ -77,85 +108,45 @@ impl Message {
         })
     }
 
-    pub fn msg(to: u128, topic: String, body: Vec<u8>) -> Self {
-        Self::Msg(Msg {
-            origin: 0,
-            to,
-            topic,
-            body,
-        })
-    }
-
-    pub fn to_msg(to: u128, body: Vec<u8>) -> Self {
-        Self::Msg(Msg {
-            origin: 0,
-            to,
-            topic: Default::default(),
-            body,
-        })
-    }
-
-    pub fn pub_msg(topic: &str, body: Vec<u8>) -> Self {
-        Self::Msg(Msg {
-            origin: 0,
-            to: 0,
-            topic: topic.to_owned(),
-            body,
-        })
-    }
-
     #[inline]
-    pub const fn origin(&self) -> u128 {
+    pub(crate) const fn origin(&self) -> u128 {
         match self {
-            Message::EldegossMsg(msg) => msg.origin,
-            Message::Msg(msg) => msg.origin,
-            Message::None => 0,
+            Sample::EldegossMsg(msg) => msg.origin,
+            Sample::Message(msg) => msg.origin,
         }
     }
 
     #[inline]
-    pub const fn to(&self) -> u128 {
+    pub(crate) const fn to(&self) -> u128 {
         match self {
-            Message::EldegossMsg(msg) => msg.to,
-            Message::Msg(msg) => msg.to,
-            Message::None => 0,
+            Sample::EldegossMsg(msg) => msg.to,
+            Sample::Message(msg) => msg.to,
         }
     }
 
     #[inline]
-    pub fn topic(&self) -> String {
+    pub(crate) fn topic(&self) -> String {
         match self {
-            Message::EldegossMsg(_) => "".to_owned(),
-            Message::Msg(msg) => msg.topic.clone(),
-            Message::None => "".to_owned(),
+            Sample::EldegossMsg(_) => "".to_owned(),
+            Sample::Message(msg) => msg.topic.clone(),
         }
     }
 
     #[inline]
-    pub fn set_origin(&mut self, origin: u128) {
+    pub(crate) fn set_origin(&mut self, origin: u128) {
         match self {
-            Message::EldegossMsg(msg) => msg.origin = origin,
-            Message::Msg(msg) => msg.origin = origin,
-            Message::None => {}
-        }
-    }
-
-    #[inline]
-    pub fn set_to(&mut self, to: u128) {
-        match self {
-            Message::EldegossMsg(msg) => msg.to = to,
-            Message::Msg(msg) => msg.to = to,
-            Message::None => {}
+            Sample::EldegossMsg(msg) => msg.origin = origin,
+            Sample::Message(msg) => msg.origin = origin,
         }
     }
 }
 
-impl Message {
+impl Sample {
     #[inline]
-    pub fn encode(&self) -> Vec<u8> {
+    pub(crate) fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         match self {
-            Message::EldegossMsg(msg) => {
+            Sample::EldegossMsg(msg) => {
                 if msg.to == 0 {
                     buf.push(Flags::EldegossBroadcast.bits());
                     buf.extend_from_slice(&msg.origin.to_be_bytes());
@@ -167,7 +158,7 @@ impl Message {
                 buf.extend_from_slice(&bincode::serialize(&msg.body).unwrap());
                 buf
             }
-            Message::Msg(msg) => {
+            Sample::Message(msg) => {
                 if !msg.topic.is_empty() {
                     if msg.to == 0 {
                         buf.push(Flags::PubSubBroadcast.bits());
@@ -190,26 +181,22 @@ impl Message {
                 buf.extend_from_slice(&msg.body);
                 buf
             }
-            Message::None => vec![],
         }
     }
 
     #[inline]
-    pub fn decode(msg: &[u8]) -> Result<Self> {
-        if msg.len() < 17 {
-            return Ok(Message::None);
-        }
+    pub(crate) fn decode(msg: &[u8]) -> Result<Self> {
         let flags = Flags::from_bits_truncate(msg[0]);
         let origin = u128::from_be_bytes(msg[1..17].try_into()?);
         match flags {
             Flags::Eldegoss => {
                 let to = u128::from_be_bytes(msg[17..33].try_into()?);
                 let body = bincode::deserialize::<EldegossMsgBody>(&msg[33..])?;
-                Ok(Message::EldegossMsg(EldegossMsg { origin, to, body }))
+                Ok(Sample::EldegossMsg(EldegossMsg { origin, to, body }))
             }
             Flags::EldegossBroadcast => {
                 let body = bincode::deserialize::<EldegossMsgBody>(&msg[17..])?;
-                Ok(Message::EldegossMsg(EldegossMsg {
+                Ok(Sample::EldegossMsg(EldegossMsg {
                     origin,
                     to: 0,
                     body,
@@ -220,7 +207,7 @@ impl Message {
                 let topic_len = u32::from_be_bytes(msg[33..37].try_into()?);
                 let topic = String::from_utf8(msg[37..37 + topic_len as usize].to_vec())?;
                 let body = msg[37 + topic_len as usize..].to_vec();
-                Ok(Message::Msg(Msg {
+                Ok(Sample::Message(Message {
                     origin,
                     to,
                     topic,
@@ -231,7 +218,7 @@ impl Message {
                 let topic_len = u32::from_be_bytes(msg[17..21].try_into()?);
                 let topic = String::from_utf8(msg[21..21 + topic_len as usize].to_vec())?;
                 let body = msg[21 + topic_len as usize..].to_vec();
-                Ok(Message::Msg(Msg {
+                Ok(Sample::Message(Message {
                     origin,
                     to: 0,
                     topic,
@@ -240,7 +227,7 @@ impl Message {
             }
             Flags::Broadcast => {
                 let body = msg[17..].to_vec();
-                Ok(Message::Msg(Msg {
+                Ok(Sample::Message(Message {
                     origin,
                     to: 0,
                     topic: "".to_owned(),
@@ -250,15 +237,45 @@ impl Message {
             Flags::To => {
                 let to = u128::from_be_bytes(msg[17..33].try_into()?);
                 let body = msg[33..].to_vec();
-                Ok(Message::Msg(Msg {
+                Ok(Sample::Message(Message {
                     origin,
                     to,
                     topic: "".to_owned(),
                     body,
                 }))
             }
-            _ => Ok(Message::None),
+            _ => Err(eyre!("unknown flags")),
         }
+    }
+}
+
+#[test]
+fn test_sample_encode() {
+    use crate::util::Stats;
+
+    common_x::log::init_log_filter("info");
+    let mut stats = Stats::new(1000);
+    let msg = Message::new(0, "topic", vec![0; 1024]).sample();
+    let bytes = msg.encode();
+    info!("bytes len: {:?}", bytes.len());
+    for _ in 0..10000 {
+        msg.encode();
+        stats.increment();
+    }
+}
+
+#[test]
+fn test_sample_decode() {
+    use crate::util::Stats;
+
+    common_x::log::init_log_filter("info");
+    let msg = Message::new(0, "topic", vec![0; 1024]).sample();
+    let bytes = msg.encode();
+    info!("bytes len: {:?}", bytes.len());
+    let mut stats = Stats::new(1000);
+    for _ in 0..10000 {
+        Sample::decode(&bytes).ok();
+        stats.increment();
     }
 }
 
@@ -273,17 +290,17 @@ fn test_flags() {
 
 #[test]
 fn test_encode_decode_msg() {
-    let msg = Message::EldegossMsg(EldegossMsg {
+    let msg = Sample::EldegossMsg(EldegossMsg {
         origin: 1,
         to: 3,
         body: EldegossMsgBody::AddMember(Member::new(1.into(), vec![])),
     });
     let buf = msg.encode();
     println!("buf is {:?}", buf);
-    let msg = Message::decode(&buf);
+    let msg = Sample::decode(&buf);
     println!("msg is {:?}", msg);
 
-    let msg = Message::Msg(Msg {
+    let msg = Sample::Message(Message {
         origin: 1,
         to: 0,
         topic: "topic".to_owned(),
@@ -291,6 +308,6 @@ fn test_encode_decode_msg() {
     });
     let buf = msg.encode();
     println!("buf is {:?}", buf);
-    let msg = Message::decode(&buf);
+    let msg = Sample::decode(&buf);
     println!("msg is {:?}", msg);
 }

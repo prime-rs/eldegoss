@@ -16,7 +16,7 @@ use tokio::select;
 use crate::{
     config::Config,
     link::Link,
-    protocol::{EldegossMsg, EldegossMsgBody, Message},
+    protocol::{EldegossMsg, EldegossMsgBody, Message, Sample},
     util::{read_msg, write_msg},
     EldegossId, Member, Membership,
 };
@@ -74,12 +74,22 @@ impl Session {
     }
 
     #[inline]
-    pub async fn recv_msg(&self) -> Result<Message> {
+    async fn recv_msg(&self) -> Result<Message> {
         Ok(self.msg_for_recv.1.recv_async().await?)
     }
 
     #[inline]
-    pub async fn send_msg(&self, mut msg: Message) {
+    pub async fn recv(&self) -> Result<Message> {
+        self.recv_msg().await
+    }
+
+    #[inline]
+    pub async fn send(&self, msg: Message) {
+        self.send_msg(msg.sample()).await;
+    }
+
+    #[inline]
+    async fn send_msg(&self, mut msg: Sample) {
         msg.set_origin(id_u128());
         let to = msg.to();
         if to != 0 {
@@ -99,9 +109,11 @@ impl Session {
     }
 
     #[inline]
-    async fn to_recv_msg(&self, msg: Message) {
-        if let Err(e) = self.msg_for_recv.0.send_async(msg).await {
-            debug!("to_recv_msg failed: {:?}", e);
+    async fn to_recv_msg(&self, msg: Sample) {
+        if let Sample::Message(msg) = msg {
+            if let Err(e) = self.msg_for_recv.0.send_async(msg).await {
+                debug!("to_recv_msg failed: {:?}", e);
+            }
         }
     }
 
@@ -213,14 +225,14 @@ impl Session {
             Ok((mut tx, mut rv)) = connection.open_bi() => {
                 write_msg(
                     &mut tx,
-                    Message::eldegoss(
+                    Sample::eldegoss(
                         0,
                         EldegossMsgBody::JoinReq(vec![]),
                     ),
                 )
                 .await.ok();
                 let msg = read_msg(&mut rv).await?;
-                if let Message::EldegossMsg(EldegossMsg {
+                if let Sample::EldegossMsg(EldegossMsg {
                     origin,
                     body: EldegossMsgBody::JoinRsp(membership),
                     ..
@@ -269,7 +281,7 @@ impl Session {
                 if let Ok((mut tx, mut rv)) = connection.accept_bi().await {
                     let msg = read_msg(&mut rv).await?;
 
-                    if let Message::EldegossMsg(EldegossMsg {
+                    if let Sample::EldegossMsg(EldegossMsg {
                         origin,
                         body: EldegossMsgBody::JoinReq(meta_data),
                         ..
@@ -296,7 +308,7 @@ impl Session {
 
                         write_msg(
                             &mut tx,
-                            Message::eldegoss(0, EldegossMsgBody::JoinRsp(membership)),
+                            Sample::eldegoss(0, EldegossMsgBody::JoinRsp(membership)),
                         )
                         .await
                         .ok();
@@ -306,7 +318,7 @@ impl Session {
                             self.membership.lock().await.add_member(member.clone());
                         }
 
-                        self.send_msg(Message::eldegoss(0, EldegossMsgBody::AddMember(member)))
+                        self.send_msg(Sample::eldegoss(0, EldegossMsgBody::AddMember(member)))
                             .await;
 
                         let (send, recv) = flume::bounded(1024);
@@ -358,11 +370,8 @@ impl Session {
     }
 
     #[inline]
-    pub(crate) async fn dispatch(&self, msg: Message, received_from: u128) {
+    pub(crate) async fn dispatch(&self, msg: Sample, received_from: u128) {
         // debug!("dispatch({received_from}) msg: {:?}", msg);
-        if let Message::None = msg {
-            return;
-        }
         match (msg.to(), msg.topic().as_str()) {
             (0, "") => {
                 self.gossip_msg(&msg, received_from).await;
@@ -408,31 +417,31 @@ impl Session {
     }
 
     #[inline]
-    async fn handle_recv_msg(&self, msg: Message) {
+    async fn handle_recv_msg(&self, msg: Sample) {
         match &msg {
-            Message::EldegossMsg(EldegossMsg {
+            Sample::EldegossMsg(EldegossMsg {
                 body: EldegossMsgBody::AddMember(member),
                 ..
             }) => {
                 self.membership.lock().await.add_member(member.clone());
             }
-            Message::EldegossMsg(EldegossMsg {
+            Sample::EldegossMsg(EldegossMsg {
                 body: EldegossMsgBody::RemoveMember(id),
                 ..
             }) => {
                 self.membership.lock().await.remove_member((*id).into());
             }
-            Message::EldegossMsg(EldegossMsg {
+            Sample::EldegossMsg(EldegossMsg {
                 body: EldegossMsgBody::CheckReq(check_id),
                 ..
             }) => {
                 let result = id_u128() == *check_id
                     || self.links.read().await.contains_key(&(*check_id).into());
                 debug!("check member: {} result: {}", check_id, result);
-                let msg = Message::eldegoss(0, EldegossMsgBody::CheckRsp(*check_id, result));
+                let msg = Sample::eldegoss(0, EldegossMsgBody::CheckRsp(*check_id, result));
                 self.send_msg(msg).await;
             }
-            Message::EldegossMsg(EldegossMsg {
+            Sample::EldegossMsg(EldegossMsg {
                 body: EldegossMsgBody::CheckRsp(id, result),
                 ..
             }) => {
@@ -451,7 +460,7 @@ impl Session {
     }
 
     #[inline]
-    async fn gossip_msg(&self, msg: &Message, received_from: u128) {
+    async fn gossip_msg(&self, msg: &Sample, received_from: u128) {
         if self.links.read().await.is_empty() || (received_from != 0 && msg.origin() == id_u128()) {
             return;
         }
@@ -496,7 +505,7 @@ impl Session {
             }
 
             for remove_id in remove_ids {
-                self.send_msg(Message::eldegoss(
+                self.send_msg(Sample::eldegoss(
                     0,
                     EldegossMsgBody::RemoveMember(remove_id.to_u128()),
                 ))
@@ -515,7 +524,7 @@ impl Session {
                 };
                 if let Some(check_id) = check_id {
                     info!("check member: {}", check_id);
-                    self.send_msg(Message::eldegoss(
+                    self.send_msg(Sample::eldegoss(
                         0,
                         EldegossMsgBody::CheckReq(check_id.to_u128()),
                     ))

@@ -16,8 +16,8 @@ async fn main() -> Result<()> {
 
     loop {
         select! {
-            Ok(msg) = session.recv_msg() => {
-                info!("recv msg: {} - {}", msg.origin(), msg.topic());
+            Ok(msg) = session.recv() => {
+                info!("recv msg: {} - {}", msg.origin, msg.topic);
             }
             _ = shutdown_signal() => {
                 info!("shutdown");

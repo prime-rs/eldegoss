@@ -15,8 +15,8 @@ async fn main() -> Result<()> {
 
     let mut stats = eldegoss::util::Stats::new(10000);
     loop {
-        let msg = Message::pub_msg("topic", vec![0; 1024]);
-        session.send_msg(msg).await;
+        let msg = Message::put("topic", vec![0; 1024]);
+        session.send(msg).await;
         stats.increment();
     }
 }

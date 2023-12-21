@@ -15,7 +15,7 @@ async fn main() -> Result<()> {
 
     let mut stats = eldegoss::util::Stats::new(10000);
     loop {
-        session.recv_msg().await.ok();
+        session.recv().await.ok();
         stats.increment();
     }
 }

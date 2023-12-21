@@ -19,8 +19,8 @@ async fn main() -> Result<()> {
     loop {
         select! {
             _ = interval.tick() => {
-                let msg = Message::pub_msg("topic", vec![count]);
-                session.send_msg(msg).await;
+                let msg = Message::put("topic", vec![count]);
+                session.send(msg).await;
                 count += 1;
                 if count == 100 {
                     count = 0;
