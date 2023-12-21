@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::EldegossId;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
