@@ -86,7 +86,7 @@ impl Session {
             let mut links = self.links.write().await;
             if let Some(link) = links.get(&to.into()) {
                 if link
-                    .send_timeout(msg.encode(), Duration::from_secs(1))
+                    .send_timeout(msg.encode(), Duration::from_millis(500))
                     .is_err()
                 {
                     links.remove(&to.into());
@@ -383,7 +383,7 @@ impl Session {
                     let mut links = self.links.write().await;
                     if let Some(link) = links.get(&to.into()) {
                         if link
-                            .send_timeout(msg.encode(), Duration::from_secs(1))
+                            .send_timeout(msg.encode(), Duration::from_millis(500))
                             .is_err()
                         {
                             links.remove(&to.into());
@@ -475,7 +475,7 @@ impl Session {
         for link in links {
             if link
                 .1
-                .send_timeout(bytes.clone(), Duration::from_secs(1))
+                .send_timeout(bytes.clone(), Duration::from_millis(500))
                 .is_err()
             {
                 self.links.write().await.remove(&link.0);
