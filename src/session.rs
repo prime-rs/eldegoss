@@ -94,7 +94,7 @@ impl Session {
         tokio::spawn(session.clone().run_server());
         session.connect().await.ok();
         tokio::spawn(session.clone().handle_send());
-        tokio::spawn(session.handle_recv(subscribers));
+        session.handle_recv(subscribers).await;
     }
 
     async fn handle_send(self) {

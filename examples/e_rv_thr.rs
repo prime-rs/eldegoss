@@ -1,6 +1,5 @@
 use clap::Parser;
 use color_eyre::Result;
-use common_x::signal::shutdown_signal;
 use eldegoss::{
     config::Config,
     session::{Session, Subscriber},
@@ -24,7 +23,5 @@ async fn main() -> Result<()> {
     })];
 
     Session::serve(config, rv, callback).await;
-
-    shutdown_signal().await;
     Ok(())
 }

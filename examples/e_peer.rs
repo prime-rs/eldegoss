@@ -22,7 +22,7 @@ async fn main() -> Result<()> {
         info!("net_msg: {:?}", net_msg);
     })];
 
-    Session::serve(config, rv, callback).await;
+    tokio::spawn(Session::serve(config, rv, callback));
 
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
     let mut count = 0;

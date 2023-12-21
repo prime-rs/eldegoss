@@ -21,7 +21,7 @@ async fn main() -> Result<()> {
         info!("net_msg: {:?}", net_msg);
     })];
 
-    Session::serve(config, rv, callback).await;
+    tokio::spawn(Session::serve(config, rv, callback));
 
     let mut stats = eldegoss::util::Stats::new(10000);
     loop {
