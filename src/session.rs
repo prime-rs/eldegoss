@@ -16,7 +16,7 @@ use tokio::select;
 use crate::{
     config::Config,
     link::Link,
-    protocol::{encode_msg, EldegossMsg, EldegossMsgBody, Message},
+    protocol::{EldegossMsg, EldegossMsgBody, Message},
     util::{read_msg, write_msg},
     EldegossId, Member, Membership,
 };
@@ -86,7 +86,7 @@ impl Session {
             let mut links = self.links.write().await;
             if let Some(link) = links.get(&to.into()) {
                 if link
-                    .send_timeout(encode_msg(&msg), Duration::from_secs(1))
+                    .send_timeout(msg.encode(), Duration::from_secs(1))
                     .is_err()
                 {
                     links.remove(&to.into());
@@ -383,7 +383,7 @@ impl Session {
                     let mut links = self.links.write().await;
                     if let Some(link) = links.get(&to.into()) {
                         if link
-                            .send_timeout(encode_msg(&msg), Duration::from_secs(1))
+                            .send_timeout(msg.encode(), Duration::from_secs(1))
                             .is_err()
                         {
                             links.remove(&to.into());
@@ -471,7 +471,7 @@ impl Session {
             .clone()
             .collect::<Vec<_>>();
 
-        let bytes = encode_msg(msg);
+        let bytes = msg.encode();
         for link in links {
             if link
                 .1

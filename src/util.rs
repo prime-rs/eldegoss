@@ -6,10 +6,7 @@ use color_eyre::Result;
 use futures::stream::{FuturesUnordered, StreamExt};
 use quinn::{RecvStream, SendStream};
 
-use crate::{
-    protocol::{decode_msg, encode_msg, Message},
-    session::id_u128,
-};
+use crate::{protocol::Message, session::id_u128};
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -79,13 +76,13 @@ pub async fn read_msg(recv: &mut RecvStream) -> Result<Message> {
     }
     let bytes = &mut vec![0_u8; n];
     recv.read_exact(bytes).await?;
-    decode_msg(bytes)
+    Message::decode(bytes)
 }
 
 #[inline]
 pub async fn write_msg(send: &mut SendStream, mut msg: Message) -> Result<()> {
     msg.set_origin(id_u128());
-    let msg_bytes = encode_msg(&msg);
+    let msg_bytes = msg.encode();
     let len_bytes = (msg_bytes.len() as u32).to_le_bytes().to_vec();
     let bytes = [len_bytes, msg_bytes].concat();
     send.write_all(&bytes).await?;

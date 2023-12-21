@@ -53,6 +53,14 @@ pub struct EldegossMsg {
     pub body: EldegossMsgBody,
 }
 
+#[derive(Debug, Default)]
+pub struct Msg {
+    pub origin: u128,
+    pub to: u128,
+    pub topic: String,
+    pub body: Vec<u8>,
+}
+
 #[derive(Debug)]
 pub enum Message {
     EldegossMsg(EldegossMsg),
@@ -142,123 +150,115 @@ impl Message {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct Msg {
-    pub origin: u128,
-    pub to: u128,
-    pub topic: String,
-    pub body: Vec<u8>,
-}
-
-#[inline]
-pub fn encode_msg(msg: &Message) -> Vec<u8> {
-    let mut buf = Vec::new();
-    match msg {
-        Message::EldegossMsg(msg) => {
-            if msg.to == 0 {
-                buf.push(Flags::EldegossBroadcast.bits());
-                buf.extend_from_slice(&msg.origin.to_be_bytes());
-            } else {
-                buf.push(Flags::Eldegoss.bits());
-                buf.extend_from_slice(&msg.origin.to_be_bytes());
-                buf.extend_from_slice(&msg.to.to_be_bytes());
-            }
-            buf.extend_from_slice(&bincode::serialize(&msg.body).unwrap());
-            buf
-        }
-        Message::Msg(msg) => {
-            if !msg.topic.is_empty() {
+impl Message {
+    #[inline]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        match self {
+            Message::EldegossMsg(msg) => {
                 if msg.to == 0 {
-                    buf.push(Flags::PubSubBroadcast.bits());
+                    buf.push(Flags::EldegossBroadcast.bits());
                     buf.extend_from_slice(&msg.origin.to_be_bytes());
                 } else {
-                    buf.push(Flags::PubSub.bits());
+                    buf.push(Flags::Eldegoss.bits());
                     buf.extend_from_slice(&msg.origin.to_be_bytes());
                     buf.extend_from_slice(&msg.to.to_be_bytes());
                 }
-                buf.extend_from_slice(&(msg.topic.len() as u32).to_be_bytes());
-                buf.extend_from_slice(msg.topic.as_bytes());
-            } else if msg.to != 0 {
-                buf.push(Flags::To.bits());
-                buf.extend_from_slice(&msg.origin.to_be_bytes());
-                buf.extend_from_slice(&msg.to.to_be_bytes());
-            } else {
-                buf.push(Flags::Broadcast.bits());
-                buf.extend_from_slice(&msg.origin.to_be_bytes());
+                buf.extend_from_slice(&bincode::serialize(&msg.body).unwrap());
+                buf
             }
-            buf.extend_from_slice(&msg.body);
-            buf
+            Message::Msg(msg) => {
+                if !msg.topic.is_empty() {
+                    if msg.to == 0 {
+                        buf.push(Flags::PubSubBroadcast.bits());
+                        buf.extend_from_slice(&msg.origin.to_be_bytes());
+                    } else {
+                        buf.push(Flags::PubSub.bits());
+                        buf.extend_from_slice(&msg.origin.to_be_bytes());
+                        buf.extend_from_slice(&msg.to.to_be_bytes());
+                    }
+                    buf.extend_from_slice(&(msg.topic.len() as u32).to_be_bytes());
+                    buf.extend_from_slice(msg.topic.as_bytes());
+                } else if msg.to != 0 {
+                    buf.push(Flags::To.bits());
+                    buf.extend_from_slice(&msg.origin.to_be_bytes());
+                    buf.extend_from_slice(&msg.to.to_be_bytes());
+                } else {
+                    buf.push(Flags::Broadcast.bits());
+                    buf.extend_from_slice(&msg.origin.to_be_bytes());
+                }
+                buf.extend_from_slice(&msg.body);
+                buf
+            }
+            Message::None => vec![],
         }
-        Message::None => vec![],
     }
-}
 
-/// decode msg from bytes.
-/// Notes: origin is not set in here, it should be set by receiver.
-#[inline]
-pub fn decode_msg(msg: &[u8]) -> Result<Message> {
-    if msg.len() < 17 {
-        return Ok(Message::None);
-    }
-    let flags = Flags::from_bits_truncate(msg[0]);
-    let origin = u128::from_be_bytes(msg[1..17].try_into()?);
-    match flags {
-        Flags::Eldegoss => {
-            let to = u128::from_be_bytes(msg[17..33].try_into()?);
-            let body = bincode::deserialize::<EldegossMsgBody>(&msg[33..])?;
-            Ok(Message::EldegossMsg(EldegossMsg { origin, to, body }))
+    #[inline]
+    pub fn decode(msg: &[u8]) -> Result<Self> {
+        if msg.len() < 17 {
+            return Ok(Message::None);
         }
-        Flags::EldegossBroadcast => {
-            let body = bincode::deserialize::<EldegossMsgBody>(&msg[17..])?;
-            Ok(Message::EldegossMsg(EldegossMsg {
-                origin,
-                to: 0,
-                body,
-            }))
+        let flags = Flags::from_bits_truncate(msg[0]);
+        let origin = u128::from_be_bytes(msg[1..17].try_into()?);
+        match flags {
+            Flags::Eldegoss => {
+                let to = u128::from_be_bytes(msg[17..33].try_into()?);
+                let body = bincode::deserialize::<EldegossMsgBody>(&msg[33..])?;
+                Ok(Message::EldegossMsg(EldegossMsg { origin, to, body }))
+            }
+            Flags::EldegossBroadcast => {
+                let body = bincode::deserialize::<EldegossMsgBody>(&msg[17..])?;
+                Ok(Message::EldegossMsg(EldegossMsg {
+                    origin,
+                    to: 0,
+                    body,
+                }))
+            }
+            Flags::PubSub => {
+                let to = u128::from_be_bytes(msg[17..33].try_into()?);
+                let topic_len = u32::from_be_bytes(msg[33..37].try_into()?);
+                let topic = String::from_utf8(msg[37..37 + topic_len as usize].to_vec())?;
+                let body = msg[37 + topic_len as usize..].to_vec();
+                Ok(Message::Msg(Msg {
+                    origin,
+                    to,
+                    topic,
+                    body,
+                }))
+            }
+            Flags::PubSubBroadcast => {
+                let topic_len = u32::from_be_bytes(msg[17..21].try_into()?);
+                let topic = String::from_utf8(msg[21..21 + topic_len as usize].to_vec())?;
+                let body = msg[21 + topic_len as usize..].to_vec();
+                Ok(Message::Msg(Msg {
+                    origin,
+                    to: 0,
+                    topic,
+                    body,
+                }))
+            }
+            Flags::Broadcast => {
+                let body = msg[17..].to_vec();
+                Ok(Message::Msg(Msg {
+                    origin,
+                    to: 0,
+                    topic: "".to_owned(),
+                    body,
+                }))
+            }
+            Flags::To => {
+                let to = u128::from_be_bytes(msg[17..33].try_into()?);
+                let body = msg[33..].to_vec();
+                Ok(Message::Msg(Msg {
+                    origin,
+                    to,
+                    topic: "".to_owned(),
+                    body,
+                }))
+            }
+            _ => Ok(Message::None),
         }
-        Flags::PubSub => {
-            let to = u128::from_be_bytes(msg[17..33].try_into()?);
-            let topic_len = u32::from_be_bytes(msg[33..37].try_into()?);
-            let topic = String::from_utf8(msg[37..37 + topic_len as usize].to_vec())?;
-            let body = msg[37 + topic_len as usize..].to_vec();
-            Ok(Message::Msg(Msg {
-                origin,
-                to,
-                topic,
-                body,
-            }))
-        }
-        Flags::PubSubBroadcast => {
-            let topic_len = u32::from_be_bytes(msg[17..21].try_into()?);
-            let topic = String::from_utf8(msg[21..21 + topic_len as usize].to_vec())?;
-            let body = msg[21 + topic_len as usize..].to_vec();
-            Ok(Message::Msg(Msg {
-                origin,
-                to: 0,
-                topic,
-                body,
-            }))
-        }
-        Flags::Broadcast => {
-            let body = msg[17..].to_vec();
-            Ok(Message::Msg(Msg {
-                origin,
-                to: 0,
-                topic: "".to_owned(),
-                body,
-            }))
-        }
-        Flags::To => {
-            let to = u128::from_be_bytes(msg[17..33].try_into()?);
-            let body = msg[33..].to_vec();
-            Ok(Message::Msg(Msg {
-                origin,
-                to,
-                topic: "".to_owned(),
-                body,
-            }))
-        }
-        _ => Ok(Message::None),
     }
 }
 
@@ -278,9 +278,9 @@ fn test_encode_decode_msg() {
         to: 3,
         body: EldegossMsgBody::AddMember(Member::new(1.into(), vec![])),
     });
-    let buf = encode_msg(&msg);
+    let buf = msg.encode();
     println!("buf is {:?}", buf);
-    let msg = decode_msg(&buf);
+    let msg = Message::decode(&buf);
     println!("msg is {:?}", msg);
 
     let msg = Message::Msg(Msg {
@@ -289,8 +289,8 @@ fn test_encode_decode_msg() {
         topic: "topic".to_owned(),
         body: vec![1, 2, 3],
     });
-    let buf = encode_msg(&msg);
+    let buf = msg.encode();
     println!("buf is {:?}", buf);
-    let msg = decode_msg(&buf);
+    let msg = Message::decode(&buf);
     println!("msg is {:?}", msg);
 }
