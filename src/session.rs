@@ -40,9 +40,27 @@ pub fn id_u128() -> u128 {
 
 type MsgForRecv = (Sender<Message>, Receiver<Message>);
 
+pub struct Subscriber {
+    pub topic: String,
+    pub callback: Box<dyn FnMut(Message) + Send + Sync + 'static>,
+}
+
+impl Subscriber {
+    pub fn new<C>(topic: &str, callback: C) -> Self
+    where
+        C: FnMut(Message) + Send + Sync + 'static,
+    {
+        Self {
+            topic: topic.to_owned(),
+            callback: Box::new(callback),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Session {
     pub(crate) msg_for_recv: MsgForRecv,
+    pub(crate) msg_for_send: Receiver<Message>,
     pub(crate) links: Arc<RwLock<HashMap<EldegossId, Sender<Vec<u8>>>>>,
     pub(crate) membership: Arc<Mutex<Membership>>,
     pub(crate) connected_locators: Arc<Mutex<HashSet<String>>>,
@@ -51,36 +69,50 @@ pub struct Session {
 }
 
 impl Session {
-    fn init(config_: Config) -> Self {
+    fn init(config_: Config, msg_for_send: Receiver<Message>) -> Self {
         init_config(config_);
         let member = Member::new(id_u128().into(), vec![]);
         let mut membership = Membership::default();
         membership.add_member(member);
         Self {
-            msg_for_recv: flume::bounded(1024),
+            msg_for_recv: flume::unbounded(),
             links: Default::default(),
             membership: Arc::new(Mutex::new(membership)),
             connected_locators: Default::default(),
             check_member_list: Default::default(),
             wait_for_remove_member_list: Default::default(),
+            msg_for_send,
         }
     }
 
-    pub async fn serve(config: Config) -> Self {
-        let session = Self::init(config);
+    pub async fn serve(
+        config: Config,
+        msg_for_send: Receiver<Message>,
+        subscribers: Vec<Subscriber>,
+    ) {
+        let session = Self::init(config, msg_for_send);
         tokio::spawn(session.clone().run_server());
         session.connect().await.ok();
-        session
+        tokio::spawn(session.clone().handle_send());
+        tokio::spawn(session.handle_recv(subscribers));
     }
 
-    #[inline]
-    async fn recv_msg(&self) -> Result<Message> {
-        Ok(self.msg_for_recv.1.recv_async().await?)
+    async fn handle_send(self) {
+        while let Ok(msg) = self.msg_for_send.recv_async().await {
+            self.send(msg).await;
+        }
     }
 
-    #[inline]
-    pub async fn recv(&self) -> Result<Message> {
-        self.recv_msg().await
+    async fn handle_recv(self, subscribers: Vec<Subscriber>) {
+        let mut subscribers = subscribers
+            .into_iter()
+            .map(|subscriber| (subscriber.topic, subscriber.callback))
+            .collect::<HashMap<_, _>>();
+        while let Ok(msg) = self.msg_for_recv.1.recv_async().await {
+            if let Some(callback) = subscribers.get_mut(&msg.topic) {
+                callback(msg);
+            }
+        }
     }
 
     #[inline]

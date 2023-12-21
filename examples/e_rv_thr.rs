@@ -1,6 +1,11 @@
 use clap::Parser;
 use color_eyre::Result;
-use eldegoss::{config::Config, session::Session, util::Args};
+use common_x::signal::shutdown_signal;
+use eldegoss::{
+    config::Config,
+    session::{Session, Subscriber},
+    util::Args,
+};
 use tracing::info;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 30)]
@@ -9,13 +14,17 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let config: Config = common_x::configure::file_config(&args.config)?;
 
-    info!("id: {:#?}", config);
+    info!("config: {:#?}", config);
 
-    let session = Session::serve(config).await;
+    let (_, rv) = flume::bounded(1024 * 1024);
 
     let mut stats = eldegoss::util::Stats::new(10000);
-    loop {
-        session.recv().await.ok();
+    let callback = vec![Subscriber::new("topic", move |_msg| {
         stats.increment();
-    }
+    })];
+
+    Session::serve(config, rv, callback).await;
+
+    shutdown_signal().await;
+    Ok(())
 }

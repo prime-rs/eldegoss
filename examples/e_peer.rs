@@ -1,7 +1,12 @@
 use clap::Parser;
 use color_eyre::Result;
 use common_x::signal::shutdown_signal;
-use eldegoss::{config::Config, protocol::Message, session::Session, util::Args};
+use eldegoss::{
+    config::Config,
+    protocol::Message,
+    session::{Session, Subscriber},
+    util::Args,
+};
 use tokio::select;
 use tracing::info;
 
@@ -12,7 +17,12 @@ async fn main() -> Result<()> {
     let config: Config = common_x::configure::file_config(&args.config)?;
     info!("id: {}", config.id);
 
-    let session = Session::serve(config).await;
+    let (tx, rv) = flume::bounded(1024 * 1024);
+    let callback = vec![Subscriber::new("topic", move |net_msg| {
+        info!("net_msg: {:?}", net_msg);
+    })];
+
+    Session::serve(config, rv, callback).await;
 
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
     let mut count = 0;
@@ -20,7 +30,7 @@ async fn main() -> Result<()> {
         select! {
             _ = interval.tick() => {
                 let msg = Message::put("topic", vec![count]);
-                session.send(msg).await;
+                tx.send_async(msg).await.ok();
                 count += 1;
                 if count == 100 {
                     count = 0;
