@@ -12,17 +12,19 @@ use tokio::sync::{Mutex, RwLock};
 
 use common_x::cert::{create_any_server_name_config, read_certs, read_key};
 use tokio::select;
+use uhlc::{HLCBuilder, HLC};
 
 use crate::{
     config::Config,
     link::Link,
-    protocol::{Command, Control, Message, Sample},
+    protocol::{Command, Message, Payload, Sample},
     util::{read_msg, write_msg},
     EldegossId, Member, Membership,
 };
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 static ID: OnceLock<u128> = OnceLock::new();
+static HLC: OnceLock<HLC> = OnceLock::new();
 
 fn init_config(config: Config) {
     let id = EldegossId::from(&config.id);
@@ -34,8 +36,16 @@ pub fn config() -> &'static Config {
     CONFIG.get_or_init(Config::default)
 }
 
+pub fn hlc() -> &'static HLC {
+    HLC.get_or_init(|| {
+        HLCBuilder::new()
+            .with_id(uhlc::ID::try_from(id_u128()).unwrap())
+            .build()
+    })
+}
+
 pub fn id_u128() -> u128 {
-    *ID.get_or_init(Default::default)
+    *ID.get_or_init(|| 1u128)
 }
 
 type MsgForRecv = (Sender<Message>, Receiver<Message>);
@@ -123,16 +133,15 @@ impl Session {
 
     #[inline]
     async fn send_msg(&self, mut msg: Sample) {
-        msg.set_origin(id_u128());
-        let to = msg.to();
-        if to != 0 {
+        msg.timestamp = Some(hlc().new_timestamp());
+        if msg.to != 0 {
             let mut links = self.links.write().await;
-            if let Some(link) = links.get(&to.into()) {
+            if let Some(link) = links.get(&msg.to.into()) {
                 if link
                     .send_timeout(msg.encode(), Duration::from_millis(500))
                     .is_err()
                 {
-                    links.remove(&to.into());
+                    links.remove(&msg.to.into());
                 } else {
                     return;
                 }
@@ -143,8 +152,8 @@ impl Session {
 
     #[inline]
     async fn to_recv_msg(&self, msg: Sample) {
-        if let Sample::Message(msg) = msg {
-            if let Err(e) = self.msg_for_recv.0.send_async(msg).await {
+        if let Payload::Message(_) = msg.payload {
+            if let Err(e) = self.msg_for_recv.0.send_async(msg.message()).await {
                 debug!("to_recv_msg failed: {:?}", e);
             }
         }
@@ -265,14 +274,11 @@ impl Session {
                 )
                 .await.ok();
                 let msg = read_msg(&mut rv).await?;
-                if let Sample::Control(Control {
-                    origin,
-                    command: Command::JoinRsp(membership),
-                    ..
-                }) = msg
+                if let Payload::Control(Command::JoinRsp(membership)) = &msg.payload
                 {
+                    let origin = msg.origin();
                     {
-                        self.membership.lock().await.merge(&membership);
+                        self.membership.lock().await.merge(membership);
                     }
 
                     let (send, recv) = flume::bounded(1024);
@@ -287,14 +293,14 @@ impl Session {
                     };
                     let mut is_old = false;
                     if self.links.read().await.contains_key(&link.id()) {
-                        info!("update link({}): {remote_address}", origin);
+                        info!("update link({origin}): {remote_address}");
                         self.connected_locators.lock().await.insert(locator.clone());
                         is_old = true;
                     }
                     if !is_old {
                         let id = link.id();
                         tokio::spawn(link.handle());
-                        info!("new link({}): {remote_address}", origin);
+                        info!("new link({origin}): {remote_address}");
                         self.insert_link(id, locator, send).await;
                     }
 
@@ -314,12 +320,8 @@ impl Session {
                 if let Ok((mut tx, mut rv)) = connection.accept_bi().await {
                     let msg = read_msg(&mut rv).await?;
 
-                    if let Sample::Control(Control {
-                        origin,
-                        command: Command::JoinReq(meta_data),
-                        ..
-                    }) = msg
-                    {
+                    if let Payload::Control(Command::JoinReq(meta_data)) = &msg.payload {
+                        let origin = msg.origin();
                         let mut is_reconnect = false;
                         let is_new = if let Some(link) = self.links.read().await.get(&origin.into())
                         {
@@ -343,7 +345,7 @@ impl Session {
                             .await
                             .ok();
 
-                        let member = Member::new(origin.into(), meta_data);
+                        let member = Member::new(origin.into(), meta_data.to_vec());
                         {
                             self.membership.lock().await.add_member(member.clone());
                         }
@@ -402,7 +404,7 @@ impl Session {
     #[inline]
     pub(crate) async fn dispatch(&self, msg: Sample, received_from: u128) {
         // debug!("dispatch({received_from}) msg: {:?}", msg);
-        match (msg.to(), msg.topic().as_str()) {
+        match (msg.to, msg.topic.as_str()) {
             (0, "") => {
                 self.gossip_msg(&msg, received_from).await;
                 self.handle_recv_msg(msg).await;
@@ -448,33 +450,21 @@ impl Session {
 
     #[inline]
     async fn handle_recv_msg(&self, msg: Sample) {
-        match &msg {
-            Sample::Control(Control {
-                command: Command::AddMember(member),
-                ..
-            }) => {
+        match &msg.payload {
+            Payload::Control(Command::AddMember(member)) => {
                 self.membership.lock().await.add_member(member.clone());
             }
-            Sample::Control(Control {
-                command: Command::RemoveMember(id),
-                ..
-            }) => {
+            Payload::Control(Command::RemoveMember(id)) => {
                 self.membership.lock().await.remove_member((*id).into());
             }
-            Sample::Control(Control {
-                command: Command::CheckReq(check_id),
-                ..
-            }) => {
+            Payload::Control(Command::CheckReq(check_id)) => {
                 let result = id_u128() == *check_id
                     || self.links.read().await.contains_key(&(*check_id).into());
                 debug!("check member: {} result: {}", check_id, result);
                 let msg = Sample::control(0, Command::CheckRsp(*check_id, result));
                 self.send_msg(msg).await;
             }
-            Sample::Control(Control {
-                command: Command::CheckRsp(id, result),
-                ..
-            }) => {
+            Payload::Control(Command::CheckRsp(id, result)) => {
                 debug!("recv check member: {} result: {}", id, result);
                 if *result {
                     self.wait_for_remove_member_list

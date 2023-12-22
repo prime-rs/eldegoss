@@ -6,8 +6,9 @@ use std::{
 use bitflags::bitflags;
 use color_eyre::{eyre::eyre, Result};
 use serde::{Deserialize, Serialize};
+use uhlc::Timestamp;
 
-use crate::{Member, Membership};
+use crate::{session::hlc, Member, Membership};
 
 bitflags! {
     #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -46,98 +47,91 @@ pub(crate) enum Command {
     CheckRsp(u128, bool),
 }
 
-#[derive(Debug)]
-pub(crate) struct Control {
-    pub origin: u128,
-    pub to: u128,
-    pub command: Command,
-}
-
 #[derive(Debug, Default)]
 pub struct Message {
-    pub origin: u128,
+    pub timestamp: Option<Timestamp>,
     pub to: u128,
     pub topic: String,
-    pub body: Vec<u8>,
+    pub payload: Vec<u8>,
 }
 
 impl Message {
-    pub fn new(to: u128, topic: &str, body: Vec<u8>) -> Self {
+    pub fn new(to: u128, topic: &str, payload: Vec<u8>) -> Self {
         Self {
             to,
             topic: topic.to_owned(),
-            body,
+            payload,
             ..Default::default()
         }
     }
 
-    pub fn to(to: u128, body: Vec<u8>) -> Self {
+    pub fn to(to: u128, payload: Vec<u8>) -> Self {
         Self {
             to,
-            body,
+            payload,
             ..Default::default()
         }
     }
 
-    pub fn put(topic: &str, body: Vec<u8>) -> Self {
+    pub fn put(topic: &str, payload: Vec<u8>) -> Self {
         Self {
             topic: topic.to_owned(),
-            body,
+            payload,
             ..Default::default()
         }
     }
 
     #[inline]
-    pub(crate) const fn sample(self) -> Sample {
-        Sample::Message(self)
+    pub(crate) fn sample(self) -> Sample {
+        Sample {
+            to: self.to,
+            topic: self.topic,
+            payload: Payload::Message(self.payload),
+            timestamp: Default::default(),
+        }
     }
 }
 
 #[derive(Debug)]
-pub(crate) enum Sample {
-    Control(Control),
-    Message(Message),
+pub(crate) enum Payload {
+    Control(Command),
+    Message(Vec<u8>),
+}
+
+#[derive(Debug)]
+pub(crate) struct Sample {
+    pub timestamp: Option<Timestamp>,
+    pub to: u128,
+    pub topic: String,
+    pub payload: Payload,
 }
 
 impl Sample {
-    pub(crate) const fn control(to: u128, body: Command) -> Self {
-        Self::Control(Control {
-            origin: 0,
+    pub(crate) fn control(to: u128, command: Command) -> Self {
+        Self {
             to,
-            command: body,
-        })
-    }
-
-    #[inline]
-    pub(crate) const fn origin(&self) -> u128 {
-        match self {
-            Sample::Control(msg) => msg.origin,
-            Sample::Message(msg) => msg.origin,
+            payload: Payload::Control(command),
+            timestamp: Default::default(),
+            topic: Default::default(),
         }
     }
 
-    #[inline]
-    pub(crate) const fn to(&self) -> u128 {
-        match self {
-            Sample::Control(msg) => msg.to,
-            Sample::Message(msg) => msg.to,
+    pub(crate) fn message(&self) -> Message {
+        Message {
+            to: self.to,
+            topic: self.topic.clone(),
+            payload: match &self.payload {
+                Payload::Control(_) => vec![],
+                Payload::Message(bytes) => bytes.clone(),
+            },
+            timestamp: self.timestamp,
         }
     }
 
-    #[inline]
-    pub(crate) fn topic(&self) -> String {
-        match self {
-            Sample::Control(_) => "".to_owned(),
-            Sample::Message(msg) => msg.topic.clone(),
-        }
-    }
-
-    #[inline]
-    pub(crate) fn set_origin(&mut self, origin: u128) {
-        match self {
-            Sample::Control(msg) => msg.origin = origin,
-            Sample::Message(msg) => msg.origin = origin,
-        }
+    pub(crate) fn origin(&self) -> u128 {
+        self.timestamp
+            .map(|timestamp| u128::from_le_bytes(timestamp.get_id().to_le_bytes()))
+            .unwrap_or_default()
     }
 }
 
@@ -145,108 +139,122 @@ impl Sample {
     #[inline]
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
-        match self {
-            Sample::Control(msg) => {
-                if msg.to == 0 {
+        let timestamp = self.timestamp.unwrap_or_else(|| hlc().new_timestamp());
+        match &self.payload {
+            Payload::Control(command) => {
+                if self.to == 0 {
                     buf.push(Flags::ControlBroadcast.bits());
-                    buf.extend_from_slice(&msg.origin.to_be_bytes());
+                    buf.extend_from_slice(&timestamp.get_id().to_le_bytes());
+                    buf.extend_from_slice(&timestamp.get_time().0.to_be_bytes());
                 } else {
                     buf.push(Flags::Control.bits());
-                    buf.extend_from_slice(&msg.origin.to_be_bytes());
-                    buf.extend_from_slice(&msg.to.to_be_bytes());
+                    buf.extend_from_slice(&timestamp.get_id().to_le_bytes());
+                    buf.extend_from_slice(&timestamp.get_time().0.to_be_bytes());
+                    buf.extend_from_slice(&self.to.to_be_bytes());
                 }
-                buf.extend_from_slice(&bincode::serialize(&msg.command).unwrap());
+                buf.extend_from_slice(&bincode::serialize(&command).unwrap());
                 buf
             }
-            Sample::Message(msg) => {
-                if !msg.topic.is_empty() {
-                    if msg.to == 0 {
+            Payload::Message(bytes) => {
+                if !self.topic.is_empty() {
+                    if self.to == 0 {
                         buf.push(Flags::PubSubBroadcast.bits());
-                        buf.extend_from_slice(&msg.origin.to_be_bytes());
+                        buf.extend_from_slice(&timestamp.get_id().to_le_bytes());
+                        buf.extend_from_slice(&timestamp.get_time().0.to_be_bytes());
                     } else {
                         buf.push(Flags::PubSub.bits());
-                        buf.extend_from_slice(&msg.origin.to_be_bytes());
-                        buf.extend_from_slice(&msg.to.to_be_bytes());
+                        buf.extend_from_slice(&timestamp.get_id().to_le_bytes());
+                        buf.extend_from_slice(&timestamp.get_time().0.to_be_bytes());
+                        buf.extend_from_slice(&self.to.to_be_bytes());
                     }
-                    buf.extend_from_slice(&(msg.topic.len() as u32).to_be_bytes());
-                    buf.extend_from_slice(msg.topic.as_bytes());
-                } else if msg.to != 0 {
+                    buf.extend_from_slice(&(self.topic.len() as u32).to_be_bytes());
+                    buf.extend_from_slice(self.topic.as_bytes());
+                } else if self.to != 0 {
                     buf.push(Flags::To.bits());
-                    buf.extend_from_slice(&msg.origin.to_be_bytes());
-                    buf.extend_from_slice(&msg.to.to_be_bytes());
+                    buf.extend_from_slice(&timestamp.get_id().to_le_bytes());
+                    buf.extend_from_slice(&timestamp.get_time().0.to_be_bytes());
+                    buf.extend_from_slice(&self.to.to_be_bytes());
                 } else {
                     buf.push(Flags::Broadcast.bits());
-                    buf.extend_from_slice(&msg.origin.to_be_bytes());
+                    buf.extend_from_slice(&timestamp.get_id().to_le_bytes());
+                    buf.extend_from_slice(&timestamp.get_time().0.to_be_bytes());
                 }
-                buf.extend_from_slice(&msg.body);
+                buf.extend_from_slice(bytes);
                 buf
             }
         }
     }
 
     #[inline]
-    pub(crate) fn decode(msg: &[u8]) -> Result<Self> {
-        let flags = Flags::from_bits_truncate(msg[0]);
-        let origin = u128::from_be_bytes(msg[1..17].try_into()?);
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
+        let flags = Flags::from_bits_truncate(bytes[0]);
+        let id = u128::from_le_bytes(bytes[1..17].try_into()?);
+        let time = u64::from_be_bytes(bytes[17..25].try_into()?);
+        let timestamp = Some(Timestamp::new(
+            uhlc::NTP64(time),
+            uhlc::ID::try_from(id).unwrap(),
+        ));
         match flags {
             Flags::Control => {
-                let to = u128::from_be_bytes(msg[17..33].try_into()?);
-                let body = bincode::deserialize::<Command>(&msg[33..])?;
-                Ok(Sample::Control(Control {
-                    origin,
+                let to = u128::from_be_bytes(bytes[25..41].try_into()?);
+                let commond = bincode::deserialize::<Command>(&bytes[41..])?;
+                Ok(Sample {
                     to,
-                    command: body,
-                }))
+                    timestamp,
+                    topic: Default::default(),
+                    payload: Payload::Control(commond),
+                })
             }
             Flags::ControlBroadcast => {
-                let body = bincode::deserialize::<Command>(&msg[17..])?;
-                Ok(Sample::Control(Control {
-                    origin,
+                let commond = bincode::deserialize::<Command>(&bytes[25..])?;
+                Ok(Sample {
                     to: 0,
-                    command: body,
-                }))
+                    timestamp,
+                    topic: Default::default(),
+                    payload: Payload::Control(commond),
+                })
             }
             Flags::PubSub => {
-                let to = u128::from_be_bytes(msg[17..33].try_into()?);
-                let topic_len = u32::from_be_bytes(msg[33..37].try_into()?);
-                let topic = String::from_utf8(msg[37..37 + topic_len as usize].to_vec())?;
-                let body = msg[37 + topic_len as usize..].to_vec();
-                Ok(Sample::Message(Message {
-                    origin,
+                let to = u128::from_be_bytes(bytes[25..41].try_into()?);
+                let topic_len = u32::from_be_bytes(bytes[41..45].try_into()?);
+                let topic = String::from_utf8(bytes[45..45 + topic_len as usize].to_vec())?;
+                let body = bytes[45 + topic_len as usize..].to_vec();
+                Ok(Sample {
+                    timestamp,
                     to,
                     topic,
-                    body,
-                }))
+                    payload: Payload::Message(body),
+                })
             }
             Flags::PubSubBroadcast => {
-                let topic_len = u32::from_be_bytes(msg[17..21].try_into()?);
-                let topic = String::from_utf8(msg[21..21 + topic_len as usize].to_vec())?;
-                let body = msg[21 + topic_len as usize..].to_vec();
-                Ok(Sample::Message(Message {
-                    origin,
-                    to: 0,
+                let topic_len = u32::from_be_bytes(bytes[25..29].try_into()?);
+                let topic = String::from_utf8(bytes[29..29 + topic_len as usize].to_vec())?;
+                let body = bytes[29 + topic_len as usize..].to_vec();
+                Ok(Sample {
+                    timestamp,
+                    to: Default::default(),
                     topic,
-                    body,
-                }))
+                    payload: Payload::Message(body),
+                })
             }
             Flags::Broadcast => {
-                let body = msg[17..].to_vec();
-                Ok(Sample::Message(Message {
-                    origin,
-                    to: 0,
-                    topic: "".to_owned(),
-                    body,
-                }))
+                let body = bytes[25..].to_vec();
+                Ok(Sample {
+                    timestamp,
+                    to: Default::default(),
+                    topic: Default::default(),
+                    payload: Payload::Message(body),
+                })
             }
             Flags::To => {
-                let to = u128::from_be_bytes(msg[17..33].try_into()?);
-                let body = msg[33..].to_vec();
-                Ok(Sample::Message(Message {
-                    origin,
+                let to = u128::from_be_bytes(bytes[25..41].try_into()?);
+                let body = bytes[41..].to_vec();
+                Ok(Sample {
+                    timestamp,
                     to,
-                    topic: "".to_owned(),
-                    body,
-                }))
+                    topic: Default::default(),
+                    payload: Payload::Message(body),
+                })
             }
             _ => Err(eyre!("unknown flags")),
         }
@@ -258,11 +266,11 @@ fn test_sample_encode() {
     use crate::util::Stats;
 
     common_x::log::init_log_filter("info");
-    let mut stats = Stats::new(1000);
+    let mut stats = Stats::new(10000);
     let msg = Message::new(0, "topic", vec![0; 1024]).sample();
     let bytes = msg.encode();
     info!("bytes len: {:?}", bytes.len());
-    for _ in 0..10000 {
+    for _ in 0..100000 {
         msg.encode();
         stats.increment();
     }
@@ -276,8 +284,8 @@ fn test_sample_decode() {
     let msg = Message::new(0, "topic", vec![0; 1024]).sample();
     let bytes = msg.encode();
     info!("bytes len: {:?}", bytes.len());
-    let mut stats = Stats::new(1000);
-    for _ in 0..10000 {
+    let mut stats = Stats::new(10000);
+    for _ in 0..100000 {
         Sample::decode(&bytes).ok();
         stats.increment();
     }
@@ -294,22 +302,18 @@ fn test_flags() {
 
 #[test]
 fn test_encode_decode_msg() {
-    let msg = Sample::Control(Control {
-        origin: 1,
-        to: 3,
-        command: Command::AddMember(Member::new(1.into(), vec![])),
-    });
+    let msg = Sample::control(3, Command::AddMember(Member::new(1.into(), vec![])));
     let buf = msg.encode();
     println!("buf is {:?}", buf);
     let msg = Sample::decode(&buf);
     println!("msg is {:?}", msg);
 
-    let msg = Sample::Message(Message {
-        origin: 1,
+    let msg = Sample {
         to: 0,
         topic: "topic".to_owned(),
-        body: vec![1, 2, 3],
-    });
+        timestamp: Default::default(),
+        payload: Payload::Message(vec![1, 2, 3, 4, 5]),
+    };
     let buf = msg.encode();
     println!("buf is {:?}", buf);
     let msg = Sample::decode(&buf);
