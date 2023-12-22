@@ -16,7 +16,7 @@ async fn main() -> Result<()> {
 
     info!("config: {:#?}", config);
 
-    let (tx, rv) = flume::bounded(1024 * 1024);
+    let (tx, rv) = flume::bounded(10240);
     let callback = vec![Subscriber::new("topic", move |net_msg| {
         info!("net_msg: {:?}", net_msg);
     })];

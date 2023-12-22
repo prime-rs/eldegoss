@@ -15,7 +15,7 @@ async fn main() -> Result<()> {
 
     info!("config: {:#?}", config);
 
-    let (_, rv) = flume::bounded(1024 * 1024);
+    let (_, rv) = flume::bounded(10240);
 
     let mut stats = eldegoss::util::Stats::new(100000);
     let callback = vec![Subscriber::new("topic", move |_msg| {
