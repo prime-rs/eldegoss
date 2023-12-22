@@ -90,7 +90,7 @@ impl Session {
         // cache
         let cache: Cache<Timestamp, ()> = Cache::builder()
             .weigher(|_, _| 128u32 + 64u32)
-            .max_capacity(1024 * 1024)
+            .max_capacity(1024 * 8)
             .time_to_live(Duration::from_secs(1))
             .build();
 
