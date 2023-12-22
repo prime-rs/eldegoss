@@ -1,14 +1,14 @@
 [package]
 name = "eldegoss"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "eldegoss net"
 readme = "README.md"
-repository = "https://github.com/JLerxky/eldegoss"
+repository = "https://github.com/prime-rs/eldegoss"
 license = "Apache-2.0"
 authors = ["JLer <jlerxky@live.com>"]
 categories = ["network-programming"]
-keywords = ["network", "p2p", "gossip", "SWIM"]
+keywords = ["network", "p2p", "gossip"]
 
 [features]
 default = []
