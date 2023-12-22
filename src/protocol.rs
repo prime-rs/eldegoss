@@ -49,7 +49,7 @@ pub(crate) enum Command {
 
 #[derive(Debug, Default)]
 pub struct Message {
-    pub timestamp: Option<Timestamp>,
+    pub(crate) timestamp: Option<Timestamp>,
     pub to: u128,
     pub topic: String,
     pub payload: Vec<u8>,
@@ -81,13 +81,25 @@ impl Message {
         }
     }
 
+    pub fn origin(&self) -> u128 {
+        self.timestamp
+            .map(|timestamp| u128::from_le_bytes(timestamp.get_id().to_le_bytes()))
+            .unwrap_or_default()
+    }
+
+    pub fn time(&self) -> u64 {
+        self.timestamp
+            .map(|timestamp| u64::from_le_bytes(timestamp.get_time().0.to_le_bytes()))
+            .unwrap_or_default()
+    }
+
     #[inline]
     pub(crate) fn sample(self) -> Sample {
         Sample {
             to: self.to,
             topic: self.topic,
             payload: Payload::Message(self.payload),
-            timestamp: Default::default(),
+            timestamp: hlc().new_timestamp(),
         }
     }
 }
@@ -100,7 +112,7 @@ pub(crate) enum Payload {
 
 #[derive(Debug)]
 pub(crate) struct Sample {
-    pub timestamp: Option<Timestamp>,
+    pub timestamp: Timestamp,
     pub to: u128,
     pub topic: String,
     pub payload: Payload,
@@ -111,7 +123,7 @@ impl Sample {
         Self {
             to,
             payload: Payload::Control(command),
-            timestamp: Default::default(),
+            timestamp: hlc().new_timestamp(),
             topic: Default::default(),
         }
     }
@@ -124,14 +136,12 @@ impl Sample {
                 Payload::Control(_) => vec![],
                 Payload::Message(bytes) => bytes.clone(),
             },
-            timestamp: self.timestamp,
+            timestamp: Some(self.timestamp),
         }
     }
 
     pub(crate) fn origin(&self) -> u128 {
-        self.timestamp
-            .map(|timestamp| u128::from_le_bytes(timestamp.get_id().to_le_bytes()))
-            .unwrap_or_default()
+        u128::from_le_bytes(self.timestamp.get_id().to_le_bytes())
     }
 }
 
@@ -139,7 +149,7 @@ impl Sample {
     #[inline]
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
-        let timestamp = self.timestamp.unwrap_or_else(|| hlc().new_timestamp());
+        let timestamp = self.timestamp;
         match &self.payload {
             Payload::Control(command) => {
                 if self.to == 0 {
@@ -190,10 +200,7 @@ impl Sample {
         let flags = Flags::from_bits_truncate(bytes[0]);
         let id = u128::from_le_bytes(bytes[1..17].try_into()?);
         let time = u64::from_be_bytes(bytes[17..25].try_into()?);
-        let timestamp = Some(Timestamp::new(
-            uhlc::NTP64(time),
-            uhlc::ID::try_from(id).unwrap(),
-        ));
+        let timestamp = Timestamp::new(uhlc::NTP64(time), uhlc::ID::try_from(id).unwrap());
         match flags {
             Flags::Control => {
                 let to = u128::from_be_bytes(bytes[25..41].try_into()?);
@@ -292,15 +299,6 @@ fn test_sample_decode() {
 }
 
 #[test]
-fn test_flags() {
-    let mut flags = Flags::empty();
-    assert_eq!(flags, Flags::empty());
-    flags = Flags::To;
-    println!("flags is {flags}");
-    println!("flags is {}", flags.bits());
-}
-
-#[test]
 fn test_encode_decode_msg() {
     let msg = Sample::control(3, Command::AddMember(Member::new(1.into(), vec![])));
     let buf = msg.encode();
@@ -308,14 +306,18 @@ fn test_encode_decode_msg() {
     let msg = Sample::decode(&buf);
     println!("msg is {:?}", msg);
 
-    let msg = Sample {
-        to: 0,
-        topic: "topic".to_owned(),
-        timestamp: Default::default(),
-        payload: Payload::Message(vec![1, 2, 3, 4, 5]),
-    };
+    let msg = Message::new(0, "topic", vec![0; 1024]).sample();
     let buf = msg.encode();
     println!("buf is {:?}", buf);
     let msg = Sample::decode(&buf);
     println!("msg is {:?}", msg);
+}
+
+#[test]
+fn test_flags() {
+    let mut flags = Flags::empty();
+    assert_eq!(flags, Flags::empty());
+    flags = Flags::To;
+    println!("flags is {flags}");
+    println!("flags is {}", flags.bits());
 }

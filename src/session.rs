@@ -109,7 +109,7 @@ impl Session {
 
     async fn handle_send(self) {
         while let Ok(msg) = self.msg_for_send.recv_async().await {
-            self.send(msg).await;
+            self.send_msg(msg.sample()).await;
         }
     }
 
@@ -127,13 +127,7 @@ impl Session {
     }
 
     #[inline]
-    pub async fn send(&self, msg: Message) {
-        self.send_msg(msg.sample()).await;
-    }
-
-    #[inline]
-    async fn send_msg(&self, mut msg: Sample) {
-        msg.timestamp = Some(hlc().new_timestamp());
+    async fn send_msg(&self, msg: Sample) {
         if msg.to != 0 {
             let mut links = self.links.write().await;
             if let Some(link) = links.get(&msg.to.into()) {
