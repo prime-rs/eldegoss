@@ -7,12 +7,13 @@ use std::{
 
 use color_eyre::{eyre::eyre, Result};
 use flume::{Receiver, Sender};
+use mini_moka::sync::Cache;
 use quinn::{ClientConfig, Connecting, Connection, Endpoint, ServerConfig, TransportConfig};
 use tokio::sync::{Mutex, RwLock};
 
 use common_x::cert::{create_any_server_name_config, read_certs, read_key};
 use tokio::select;
-use uhlc::{HLCBuilder, HLC};
+use uhlc::{HLCBuilder, Timestamp, HLC};
 
 use crate::{
     config::Config,
@@ -76,6 +77,7 @@ pub struct Session {
     pub(crate) connected_locators: Arc<Mutex<HashSet<String>>>,
     pub(crate) check_member_list: Arc<Mutex<Vec<EldegossId>>>,
     pub(crate) wait_for_remove_member_list: Arc<Mutex<Vec<EldegossId>>>,
+    pub(crate) cache: Cache<Timestamp, ()>,
 }
 
 impl Session {
@@ -84,6 +86,14 @@ impl Session {
         let member = Member::new(id_u128().into(), vec![]);
         let mut membership = Membership::default();
         membership.add_member(member);
+
+        // cache
+        let cache: Cache<Timestamp, ()> = Cache::builder()
+            .weigher(|_, _| 128u32 + 64u32)
+            .max_capacity(1024 * 1024)
+            .time_to_live(Duration::from_secs(1))
+            .build();
+
         Self {
             msg_for_recv: flume::unbounded(),
             links: Default::default(),
@@ -92,6 +102,7 @@ impl Session {
             check_member_list: Default::default(),
             wait_for_remove_member_list: Default::default(),
             msg_for_send,
+            cache,
         }
     }
 
@@ -102,8 +113,8 @@ impl Session {
     ) {
         let session = Self::init(config, msg_for_send);
         tokio::spawn(session.clone().run_server());
-        session.connect().await.ok();
         tokio::spawn(session.clone().handle_send());
+        tokio::spawn(session.clone().connect());
         session.handle_recv(subscribers).await;
     }
 
@@ -153,7 +164,7 @@ impl Session {
         }
     }
 
-    async fn connect(&self) -> Result<()> {
+    async fn connect(self) -> Result<()> {
         let Config {
             ca_path,
             connect,
@@ -398,6 +409,11 @@ impl Session {
     #[inline]
     pub(crate) async fn dispatch(&self, msg: Sample, received_from: u128) {
         // debug!("dispatch({received_from}) msg: {:?}", msg);
+        if self.cache.contains_key(&msg.timestamp) {
+            info!("duplicate msg: {:?}", msg.timestamp);
+            return;
+        }
+        self.cache.insert(msg.timestamp, ());
         match (msg.to, msg.topic.as_str()) {
             (0, "") => {
                 self.gossip_msg(&msg, received_from).await;
