@@ -124,7 +124,6 @@ impl Session {
         }
     }
 
-    // TODO: Filter out duplicate messages
     async fn handle_recv(self, subscribers: Vec<Subscriber>) {
         let mut subscribers = subscribers
             .into_iter()
@@ -279,11 +278,19 @@ impl Session {
                 )
                 .await.ok();
                 let msg = read_msg(&mut rv).await?;
-                if let Payload::Control(Command::JoinRsp(membership)) = &msg.payload
+                if let Payload::Control(Command::JoinRsp((is_existed, membership))) = &msg.payload
                 {
                     let origin = msg.origin();
                     {
                         self.membership.lock().await.merge(membership);
+                    }
+
+                    if *is_existed {
+                        if self.links.read().await.contains_key(&origin.into()) {
+                            info!("update link({origin}): {remote_address}");
+                            self.connected_locators.lock().await.insert(locator.clone());
+                        }
+                        return Err(eyre!("link({origin}) already exists: {remote_address}"));
                     }
 
                     let (send, recv) = flume::bounded(1024);
@@ -338,17 +345,27 @@ impl Session {
                             true
                         };
 
-                        if !is_new && !is_reconnect {
-                            info!("link({origin}) already exists: {remote_address}");
-                            return Err(eyre!("link({origin}) already exists: {remote_address}"));
-                        }
-
                         let membership = self.membership.lock().await.clone();
                         debug!("memberlist: {membership:#?}");
 
-                        write_msg(&mut tx, Sample::control(0, Command::JoinRsp(membership)))
+                        if !is_new && !is_reconnect {
+                            write_msg(
+                                &mut tx,
+                                Sample::control(origin, Command::JoinRsp((true, membership))),
+                            )
                             .await
                             .ok();
+                            info!("link({origin}) already exists: {remote_address}");
+                            tx.stopped().await.ok();
+                            return Err(eyre!("link({origin}) already exists: {remote_address}"));
+                        }
+
+                        write_msg(
+                            &mut tx,
+                            Sample::control(origin, Command::JoinRsp((false, membership))),
+                        )
+                        .await
+                        .ok();
 
                         let member = Member::new(origin.into(), meta_data.to_vec());
                         {
@@ -410,7 +427,7 @@ impl Session {
     pub(crate) async fn dispatch(&self, msg: Sample, received_from: u128) {
         // debug!("dispatch({received_from}) msg: {:?}", msg);
         if self.cache.contains_key(&msg.timestamp) {
-            info!("duplicate msg: {:?}", msg.timestamp);
+            // debug!("duplicate msg: {:?}", msg.timestamp);
             return;
         }
         self.cache.insert(msg.timestamp, ());

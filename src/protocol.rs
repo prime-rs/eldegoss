@@ -42,7 +42,7 @@ pub(crate) enum Command {
     AddMember(Member),
     RemoveMember(u128),
     JoinReq(Vec<u8>),
-    JoinRsp(Membership),
+    JoinRsp((bool, Membership)),
     CheckReq(u128),
     CheckRsp(u128, bool),
 }
