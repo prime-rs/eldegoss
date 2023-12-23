@@ -22,7 +22,7 @@ async fn main() -> Result<()> {
         info!("net_msg: {:?}", net_msg);
     })];
 
-    tokio::spawn(Session::serve(config, rv, callback));
+    let session = Session::serve(config, rv, callback).await;
 
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
     let mut count = 0;
@@ -35,6 +35,10 @@ async fn main() -> Result<()> {
                 if count == 100 {
                     count = 0;
                 }
+
+                session.membership().await.iter().for_each(|(eid, meta_data)| {
+                    info!("member({eid}): {meta_data:?}", );
+                });
             }
             _ = shutdown_signal() => {
                 info!("shutdown");

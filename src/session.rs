@@ -106,16 +106,18 @@ impl Session {
         }
     }
 
+    // TODO: 优雅退出, 成员及邻居节点在线状态实时更新
     pub async fn serve(
         config: Config,
         msg_for_send: Receiver<Message>,
         subscribers: Vec<Subscriber>,
-    ) {
+    ) -> Self {
         let session = Self::init(config, msg_for_send);
         tokio::spawn(session.clone().run_server());
         tokio::spawn(session.clone().handle_send());
         tokio::spawn(session.clone().connect());
-        session.handle_recv(subscribers).await;
+        tokio::spawn(session.clone().handle_recv(subscribers));
+        session
     }
 
     async fn handle_send(self) {
@@ -537,6 +539,10 @@ impl Session {
                 self.links.write().await.remove(&link.0);
             }
         }
+    }
+
+    pub async fn membership(&self) -> tokio::sync::MutexGuard<'_, Membership> {
+        self.membership.lock().await
     }
 
     async fn maintain_membership(&self) {

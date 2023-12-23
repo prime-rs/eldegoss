@@ -97,16 +97,10 @@ fn test_id() {
     println!("u128: {}", id.to_u128());
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Member {
     id: EldegossId,
     meta_data: Vec<u8>,
-}
-
-impl Hash for Member {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.id.hash(state);
-    }
 }
 
 impl Member {
@@ -115,7 +109,7 @@ impl Member {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Membership {
     member_map: HashMap<EldegossId, Vec<u8>>,
 }
@@ -125,18 +119,34 @@ impl Membership {
         self.member_map.contains_key(id)
     }
 
-    pub fn merge(&mut self, other: &Self) {
+    pub fn get(&self, id: &EldegossId) -> Option<&Vec<u8>> {
+        self.member_map.get(id)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&EldegossId, &Vec<u8>)> {
+        self.member_map.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.member_map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.member_map.is_empty()
+    }
+
+    pub(crate) fn merge(&mut self, other: &Self) {
         self.member_map.extend(other.member_map.clone());
         debug!("after merge: {:#?}", self.member_map);
     }
 
-    pub fn add_member(&mut self, member: Member) {
+    pub(crate) fn add_member(&mut self, member: Member) {
         debug!("add member: {:?}", member);
         self.member_map.insert(member.id, member.meta_data);
         debug!("after add: {:#?}", self.member_map);
     }
 
-    pub fn remove_member(&mut self, id: EldegossId) {
+    pub(crate) fn remove_member(&mut self, id: EldegossId) {
         if id_u128() == id.to_u128() {
             info!("cant remove self");
             return;
