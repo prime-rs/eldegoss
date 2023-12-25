@@ -68,20 +68,68 @@ impl Subscriber {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Session {
+    pub(crate) membership: Arc<Mutex<Membership>>,
+    pub(crate) close_channel: (Option<Sender<()>>, Receiver<()>),
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.close_channel.0.take();
+        self.close_channel
+            .1
+            .recv_timeout(Duration::from_secs(1))
+            .ok();
+        info!("session: Active shutdown");
+    }
+}
+
+impl Session {
+    pub async fn serve(
+        config: Config,
+        msg_for_send: Receiver<Message>,
+        subscribers: Vec<Subscriber>,
+    ) -> Self {
+        let (close_channel_tx, close_channel_rv) = flume::bounded(0);
+        let (close_confirm_tx, close_confirm_rv) = flume::bounded(0);
+        let session_runtime =
+            SessionRuntime::init(config, msg_for_send, close_channel_rv, close_confirm_tx);
+        tokio::spawn(session_runtime.clone().run_server());
+        tokio::spawn(session_runtime.clone().handle_send());
+        tokio::spawn(session_runtime.clone().connector());
+        tokio::spawn(session_runtime.clone().handle_recv(subscribers));
+
+        Self {
+            membership: session_runtime.membership.clone(),
+            close_channel: (Some(close_channel_tx), close_confirm_rv),
+        }
+    }
+    pub async fn membership(&self) -> tokio::sync::MutexGuard<'_, Membership> {
+        self.membership.lock().await
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct SessionRuntime {
     pub(crate) msg_for_recv: MsgForRecv,
     pub(crate) msg_for_send: Receiver<Message>,
-    pub(crate) links: Arc<RwLock<HashMap<EldegossId, Sender<Vec<u8>>>>>,
+    pub(crate) links: Arc<RwLock<HashMap<EldegossId, Sender<Arc<Sample>>>>>,
     pub(crate) membership: Arc<Mutex<Membership>>,
     pub(crate) connected_locators: Arc<Mutex<HashSet<String>>>,
     pub(crate) check_member_list: Arc<Mutex<Vec<EldegossId>>>,
     pub(crate) wait_for_remove_member_list: Arc<Mutex<Vec<EldegossId>>>,
     pub(crate) cache: Cache<Timestamp, ()>,
+    pub(crate) close_channel: (Sender<()>, Receiver<()>),
 }
 
-impl Session {
-    fn init(config_: Config, msg_for_send: Receiver<Message>) -> Self {
+impl SessionRuntime {
+    fn init(
+        config_: Config,
+        msg_for_send: Receiver<Message>,
+        close_channel: Receiver<()>,
+        _close_confirm: Sender<()>,
+    ) -> Self {
         init_config(config_);
         let member = Member::new(id_u128().into(), vec![]);
         let mut membership = Membership::default();
@@ -103,26 +151,21 @@ impl Session {
             wait_for_remove_member_list: Default::default(),
             msg_for_send,
             cache,
+            close_channel: (_close_confirm, close_channel),
         }
     }
 
-    // TODO: 优雅退出, 成员及邻居节点在线状态实时更新
-    pub async fn serve(
-        config: Config,
-        msg_for_send: Receiver<Message>,
-        subscribers: Vec<Subscriber>,
-    ) -> Self {
-        let session = Self::init(config, msg_for_send);
-        tokio::spawn(session.clone().run_server());
-        tokio::spawn(session.clone().handle_send());
-        tokio::spawn(session.clone().connect());
-        tokio::spawn(session.clone().handle_recv(subscribers));
-        session
-    }
-
     async fn handle_send(self) {
-        while let Ok(msg) = self.msg_for_send.recv_async().await {
-            self.send_msg(msg.sample()).await;
+        loop {
+            select! {
+                Ok(msg) = self.msg_for_send.recv_async() => {
+                    self.send_msg(msg.sample()).await;
+                }
+                _ = self.close_channel.1.recv_async() => {
+                    debug!("handle_send: Active shutdown");
+                    break;
+                }
+            }
         }
     }
 
@@ -131,33 +174,44 @@ impl Session {
             .into_iter()
             .map(|subscriber| (subscriber.topic, subscriber.callback))
             .collect::<HashMap<_, _>>();
-        while let Ok(msg) = self.msg_for_recv.1.recv_async().await {
-            if let Some(callback) = subscribers.get_mut(&msg.topic) {
-                callback(msg);
+
+        loop {
+            select! {
+                Ok(msg) = self.msg_for_recv.1.recv_async() => {
+                    if let Some(callback) = subscribers.get_mut(&msg.topic) {
+                        callback(msg);
+                    }
+                }
+                _ = self.close_channel.1.recv_async() => {
+                    debug!("handle_recv: Active shutdown");
+                    break;
+                }
             }
         }
     }
 
     #[inline]
     async fn send_msg(&self, msg: Sample) {
+        let msg = Arc::new(msg);
         if msg.to != 0 {
             let mut links = self.links.write().await;
             if let Some(link) = links.get(&msg.to.into()) {
+                let to = msg.to.into();
                 if link
-                    .send_timeout(msg.encode(), Duration::from_millis(500))
+                    .send_timeout(msg.clone(), Duration::from_millis(500))
                     .is_err()
                 {
-                    links.remove(&msg.to.into());
+                    links.remove(&to);
                 } else {
                     return;
                 }
             }
         }
-        self.gossip_msg(&msg, 0).await;
+        self.gossip_msg(msg, 0).await;
     }
 
     #[inline]
-    async fn to_recv_msg(&self, msg: Sample) {
+    async fn to_recv_msg(&self, msg: &Sample) {
         if let Payload::Message(_) = msg.payload {
             if let Err(e) = self.msg_for_recv.0.send_async(msg.message()).await {
                 debug!("to_recv_msg failed: {:?}", e);
@@ -165,7 +219,7 @@ impl Session {
         }
     }
 
-    async fn connect(self) -> Result<()> {
+    async fn connector(self) -> Result<()> {
         let Config {
             ca_path,
             connect,
@@ -194,16 +248,23 @@ impl Session {
             let mut interval = tokio::time::interval(Duration::from_secs(*check_link_interval));
             interval.tick().await;
             loop {
-                interval.tick().await;
-                for conn in connect {
-                    if session.connected_locators.lock().await.contains(conn) {
-                        continue;
+                select! {
+                    _ = self.close_channel.1.recv_async() => {
+                        debug!("connector: Active shutdown");
+                        break;
                     }
-                    info!("reconnect to: {conn}");
-                    session
-                        .connect_to(&client_config, conn.to_string())
-                        .await
-                        .ok();
+                    _ = interval.tick() => {
+                        for conn in connect {
+                            if session.connected_locators.lock().await.contains(conn) {
+                                continue;
+                            }
+                            info!("reconnect to: {conn}");
+                            session
+                                .connect_to(&client_config, conn.to_string())
+                                .await
+                                .ok();
+                        }
+                    }
                 }
             }
         });
@@ -254,6 +315,10 @@ impl Session {
                     debug!("connection incoming");
                     tokio::spawn(self.clone().handle_join_request(connecting));
                     debug!("connected");
+                }
+                _ = self.close_channel.1.recv_async() => {
+                    debug!("serve: Active shutdown");
+                    return Ok(());
                 }
                 _ = check_link_interval.tick() => self.maintain_membership().await
             }
@@ -410,7 +475,7 @@ impl Session {
         }
     }
 
-    async fn insert_link(&self, id: EldegossId, locator: String, link: Sender<Vec<u8>>) {
+    async fn insert_link(&self, id: EldegossId, locator: String, link: Sender<Arc<Sample>>) {
         let id_u128 = id.to_u128();
         self.wait_for_remove_member_list
             .lock()
@@ -432,28 +497,29 @@ impl Session {
             // debug!("duplicate msg: {:?}", msg.timestamp);
             return;
         }
+        let msg = Arc::new(msg);
         self.cache.insert(msg.timestamp, ());
         match (msg.to, msg.topic.as_str()) {
             (0, "") => {
-                self.gossip_msg(&msg, received_from).await;
-                self.handle_recv_msg(msg).await;
+                self.gossip_msg(msg.clone(), received_from).await;
+                self.handle_recv_msg(&msg).await;
             }
             (0, topic) => {
-                self.gossip_msg(&msg, received_from).await;
+                self.gossip_msg(msg.clone(), received_from).await;
 
                 if config().subscription_list.contains(&topic.to_owned()) {
-                    self.to_recv_msg(msg).await;
+                    self.to_recv_msg(&msg).await;
                 }
             }
             (to, "") => {
                 if to == id_u128() {
-                    self.handle_recv_msg(msg).await;
+                    self.handle_recv_msg(&msg).await;
                 } else {
                     let mut send_err = false;
                     let mut links = self.links.write().await;
                     if let Some(link) = links.get(&to.into()) {
                         if link
-                            .send_timeout(msg.encode(), Duration::from_millis(500))
+                            .send_timeout(msg.clone(), Duration::from_millis(500))
                             .is_err()
                         {
                             links.remove(&to.into());
@@ -461,24 +527,24 @@ impl Session {
                         }
                     }
                     if send_err {
-                        self.gossip_msg(&msg, received_from).await;
+                        self.gossip_msg(msg.clone(), received_from).await;
                     }
                 }
             }
             (to, topic) => {
                 if to == id_u128() {
                     if config().subscription_list.contains(&topic.to_owned()) {
-                        self.to_recv_msg(msg).await;
+                        self.to_recv_msg(&msg).await;
                     }
                 } else {
-                    self.gossip_msg(&msg, received_from).await;
+                    self.gossip_msg(msg.clone(), received_from).await;
                 }
             }
         }
     }
 
     #[inline]
-    async fn handle_recv_msg(&self, msg: Sample) {
+    async fn handle_recv_msg(&self, msg: &Sample) {
         match &msg.payload {
             Payload::Control(Command::AddMember(member)) => {
                 self.membership.lock().await.add_member(member.clone());
@@ -509,7 +575,7 @@ impl Session {
     }
 
     #[inline]
-    async fn gossip_msg(&self, msg: &Sample, received_from: u128) {
+    async fn gossip_msg(&self, msg: Arc<Sample>, received_from: u128) {
         if self.links.read().await.is_empty() || (received_from != 0 && msg.origin() == id_u128()) {
             return;
         }
@@ -529,20 +595,15 @@ impl Session {
             .clone()
             .collect::<Vec<_>>();
 
-        let bytes = msg.encode();
         for link in links {
             if link
                 .1
-                .send_timeout(bytes.clone(), Duration::from_millis(500))
+                .send_timeout(msg.clone(), Duration::from_millis(500))
                 .is_err()
             {
                 self.links.write().await.remove(&link.0);
             }
         }
-    }
-
-    pub async fn membership(&self) -> tokio::sync::MutexGuard<'_, Membership> {
-        self.membership.lock().await
     }
 
     async fn maintain_membership(&self) {
