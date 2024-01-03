@@ -8,7 +8,7 @@ repository = "https://github.com/prime-rs/eldegoss"
 license = "Apache-2.0"
 authors = ["JLer <jlerxky@live.com>"]
 categories = ["network-programming"]
-keywords = ["network", "p2p", "gossip"]
+keywords = ["network", "p2p", "gossip", "pub/sub"]
 
 [features]
 default = []
