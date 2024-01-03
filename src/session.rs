@@ -89,7 +89,7 @@ impl Session {
     pub async fn serve(config: Config, subscribers: Vec<Subscriber>) -> Self {
         let (msg_for_send_tx, msg_for_send_rv) = flume::bounded(10240);
         let close_handler = close_chain().lock().handler(0);
-        let mut close_handler_rt = close_chain().lock().handler(1);
+        let close_handler_rt = close_chain().lock().handler(1);
         let session_runtime = SessionRuntime::init(config, msg_for_send_rv);
 
         tokio::spawn(session_runtime.clone().run_server());
@@ -234,7 +234,7 @@ impl SessionRuntime {
 
         tokio::spawn(async move {
             let Config { connect, .. } = &config();
-            let mut close_handler = close_chain().lock().handler(1);
+            let close_handler = close_chain().lock().handler(1);
             let mut interval = tokio::time::interval(Duration::from_secs(*check_link_interval));
             interval.tick().await;
             loop {
@@ -299,7 +299,7 @@ impl SessionRuntime {
         let mut check_link_interval =
             tokio::time::interval(Duration::from_secs(*check_link_interval));
         check_link_interval.tick().await;
-        let mut close_handler = close_chain().lock().handler(1);
+        let close_handler = close_chain().lock().handler(1);
         loop {
             select! {
                 Some(connecting) = endpoint.accept() => {

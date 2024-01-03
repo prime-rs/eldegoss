@@ -32,7 +32,7 @@ impl Link {
             send,
             session,
             msg_to_send,
-            mut close_handler,
+            close_handler,
         } = self;
 
         select! {
