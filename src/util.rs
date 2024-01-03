@@ -1,9 +1,7 @@
-use std::future::Future;
 use std::time::Instant;
 
 use clap::Parser;
 use color_eyre::{eyre::eyre, Result};
-use futures::stream::{FuturesUnordered, StreamExt};
 use quinn::{RecvStream, SendStream};
 
 use crate::protocol::Sample;
@@ -86,22 +84,4 @@ pub(crate) async fn write_msg(send: &mut SendStream, msg: Sample) -> Result<()> 
     let bytes = [len_bytes, msg_bytes].concat();
     send.write_all(&bytes).await?;
     Ok(())
-}
-
-pub async fn select_ok<F, A, B>(futs: impl IntoIterator<Item = F>) -> Result<A, B>
-where
-    F: Future<Output = Result<A, B>>,
-{
-    let mut futs: FuturesUnordered<F> = futs.into_iter().collect();
-
-    let mut last_error: Option<B> = None;
-    while let Some(next) = futs.next().await {
-        match next {
-            Ok(ok) => return Ok(ok),
-            Err(err) => {
-                last_error = Some(err);
-            }
-        }
-    }
-    Err(last_error.expect("Empty iterator."))
 }
