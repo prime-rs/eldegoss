@@ -1,6 +1,0 @@
-id = "00000000000000000000000000000001"
-listen = "[::]:4722"
-cert_path = "./config/cert/client_cert.pem"
-private_key_path = "./config/cert/client_key.pem"
-ca_path = "./config/cert/ca_cert.pem"
-subscription_list = ["topic"]

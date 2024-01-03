@@ -1,5 +1,6 @@
 use clap::Parser;
 use color_eyre::Result;
+use common_x::signal::shutdown_signal;
 use eldegoss::{
     config::Config,
     protocol::Message,
@@ -16,17 +17,23 @@ async fn main() -> Result<()> {
 
     info!("config: {:#?}", config);
 
-    let (tx, rv) = flume::bounded(10240);
-    let callback = vec![Subscriber::new("topic", move |net_msg| {
-        info!("net_msg: {:?}", net_msg);
+    let mut stats = eldegoss::util::Stats::new(100000);
+    let callback = vec![Subscriber::new("topic", move |_net_msg| {
+        stats.increment();
     })];
 
-    tokio::spawn(Session::serve(config, rv, callback));
+    // for graceful shutdown
+    let session = Session::serve(config, callback).await;
+    let sender = session.sender();
 
-    let mut stats = eldegoss::util::Stats::new(100000);
-    loop {
-        let msg = Message::put("topic", vec![0; 1024]);
-        tx.send_async(msg).await.ok();
-        stats.increment();
-    }
+    let sender_handle = tokio::spawn(async move {
+        loop {
+            let msg = Message::put("topic", vec![0; 1024]);
+            sender.send_async(msg).await.ok();
+        }
+    });
+    shutdown_signal().await;
+    sender_handle.abort();
+    info!("shutdown");
+    Ok(())
 }

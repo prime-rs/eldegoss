@@ -160,8 +160,8 @@ impl Membership {
 #[tokio::test]
 async fn cert() {
     use common_x::{
-        cert::{ca_cert, create_csr, restore_ca_cert, sign_csr},
         file::{create_file, read_file_to_string},
+        tls::{ca_cert, create_csr, restore_ca_cert, sign_csr},
     };
     // ca
     let (_, ca_cert_pem, ca_key_pem) = ca_cert();

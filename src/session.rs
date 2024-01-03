@@ -11,7 +11,10 @@ use mini_moka::sync::Cache;
 use quinn::{ClientConfig, Connecting, Connection, Endpoint, ServerConfig, TransportConfig};
 use tokio::sync::{Mutex, RwLock};
 
-use common_x::cert::{create_any_server_name_config, read_certs, read_key};
+use common_x::{
+    graceful_shutdown::{close_chain, CloseHandler},
+    tls::{create_any_server_name_config, read_certs, read_key},
+};
 use tokio::select;
 use uhlc::{HLCBuilder, Timestamp, HLC};
 
@@ -68,43 +71,53 @@ impl Subscriber {
     }
 }
 
-#[derive(Debug)]
 pub struct Session {
+    pub(crate) sender: Sender<Message>,
     pub(crate) membership: Arc<Mutex<Membership>>,
-    pub(crate) close_channel: (Option<Sender<()>>, Receiver<()>),
+    pub(crate) close_handler: CloseHandler,
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        self.close_channel.0.take();
-        self.close_channel
-            .1
-            .recv_timeout(Duration::from_secs(1))
-            .ok();
-        info!("session: Active shutdown");
+        close_chain().lock().close();
+        self.close_handler.handle();
+        info!("Session: Active shutdown");
     }
 }
 
 impl Session {
-    pub async fn serve(
-        config: Config,
-        msg_for_send: Receiver<Message>,
-        subscribers: Vec<Subscriber>,
-    ) -> Self {
-        let (close_channel_tx, close_channel_rv) = flume::bounded(0);
-        let (close_confirm_tx, close_confirm_rv) = flume::bounded(0);
-        let session_runtime =
-            SessionRuntime::init(config, msg_for_send, close_channel_rv, close_confirm_tx);
+    pub async fn serve(config: Config, subscribers: Vec<Subscriber>) -> Self {
+        let (msg_for_send_tx, msg_for_send_rv) = flume::bounded(10240);
+        let close_handler = close_chain().lock().handler(0);
+        let mut close_handler_rt = close_chain().lock().handler(1);
+        let session_runtime = SessionRuntime::init(config, msg_for_send_rv);
+
         tokio::spawn(session_runtime.clone().run_server());
-        tokio::spawn(session_runtime.clone().handle_send());
+
         tokio::spawn(session_runtime.clone().connector());
-        tokio::spawn(session_runtime.clone().handle_recv(subscribers));
+
+        let session_runtime_ = session_runtime.clone();
+        tokio::spawn(async move {
+            select! {
+                _ = session_runtime_.handle_send() => {}
+                _ = session_runtime_.handle_recv(subscribers) => {}
+                _ = close_handler_rt.handle_async() => {
+                    info!("handle msg: Active shutdown");
+                }
+            }
+        });
 
         Self {
             membership: session_runtime.membership.clone(),
-            close_channel: (Some(close_channel_tx), close_confirm_rv),
+            sender: msg_for_send_tx,
+            close_handler,
         }
     }
+
+    pub fn sender(&self) -> Sender<Message> {
+        self.sender.clone()
+    }
+
     pub async fn membership(&self) -> tokio::sync::MutexGuard<'_, Membership> {
         self.membership.lock().await
     }
@@ -120,16 +133,10 @@ pub(crate) struct SessionRuntime {
     pub(crate) check_member_list: Arc<Mutex<Vec<EldegossId>>>,
     pub(crate) wait_for_remove_member_list: Arc<Mutex<Vec<EldegossId>>>,
     pub(crate) cache: Cache<Timestamp, ()>,
-    pub(crate) close_channel: (Sender<()>, Receiver<()>),
 }
 
 impl SessionRuntime {
-    fn init(
-        config_: Config,
-        msg_for_send: Receiver<Message>,
-        close_channel: Receiver<()>,
-        _close_confirm: Sender<()>,
-    ) -> Self {
+    fn init(config_: Config, msg_for_send: Receiver<Message>) -> Self {
         init_config(config_);
         let member = Member::new(id_u128().into(), vec![]);
         let mut membership = Membership::default();
@@ -151,41 +158,24 @@ impl SessionRuntime {
             wait_for_remove_member_list: Default::default(),
             msg_for_send,
             cache,
-            close_channel: (_close_confirm, close_channel),
         }
     }
 
-    async fn handle_send(self) {
-        loop {
-            select! {
-                Ok(msg) = self.msg_for_send.recv_async() => {
-                    self.send_msg(msg.sample()).await;
-                }
-                _ = self.close_channel.1.recv_async() => {
-                    debug!("handle_send: Active shutdown");
-                    break;
-                }
-            }
+    async fn handle_send(&self) {
+        while let Ok(msg) = self.msg_for_send.recv_async().await {
+            self.send_msg(msg.sample()).await;
         }
     }
 
-    async fn handle_recv(self, subscribers: Vec<Subscriber>) {
+    async fn handle_recv(&self, subscribers: Vec<Subscriber>) {
         let mut subscribers = subscribers
             .into_iter()
             .map(|subscriber| (subscriber.topic, subscriber.callback))
             .collect::<HashMap<_, _>>();
 
-        loop {
-            select! {
-                Ok(msg) = self.msg_for_recv.1.recv_async() => {
-                    if let Some(callback) = subscribers.get_mut(&msg.topic) {
-                        callback(msg);
-                    }
-                }
-                _ = self.close_channel.1.recv_async() => {
-                    debug!("handle_recv: Active shutdown");
-                    break;
-                }
+        while let Ok(msg) = self.msg_for_recv.1.recv_async().await {
+            if let Some(callback) = subscribers.get_mut(&msg.topic) {
+                callback(msg);
             }
         }
     }
@@ -242,24 +232,24 @@ impl SessionRuntime {
             self.connect_to(&client_config, conn.to_string()).await.ok();
         }
 
-        let session = self.clone();
         tokio::spawn(async move {
             let Config { connect, .. } = &config();
+            let mut close_handler = close_chain().lock().handler(1);
             let mut interval = tokio::time::interval(Duration::from_secs(*check_link_interval));
             interval.tick().await;
             loop {
                 select! {
-                    _ = self.close_channel.1.recv_async() => {
-                        debug!("connector: Active shutdown");
+                    _ = close_handler.handle_async() => {
+                        info!("connector: Active shutdown");
                         break;
                     }
                     _ = interval.tick() => {
                         for conn in connect {
-                            if session.connected_locators.lock().await.contains(conn) {
+                            if self.connected_locators.lock().await.contains(conn) {
                                 continue;
                             }
                             info!("reconnect to: {conn}");
-                            session
+                            self
                                 .connect_to(&client_config, conn.to_string())
                                 .await
                                 .ok();
@@ -309,6 +299,7 @@ impl SessionRuntime {
         let mut check_link_interval =
             tokio::time::interval(Duration::from_secs(*check_link_interval));
         check_link_interval.tick().await;
+        let mut close_handler = close_chain().lock().handler(1);
         loop {
             select! {
                 Some(connecting) = endpoint.accept() => {
@@ -316,8 +307,8 @@ impl SessionRuntime {
                     tokio::spawn(self.clone().handle_join_request(connecting));
                     debug!("connected");
                 }
-                _ = self.close_channel.1.recv_async() => {
-                    debug!("serve: Active shutdown");
+                _ = close_handler.handle_async() => {
+                    info!("serve: Active shutdown");
                     return Ok(());
                 }
                 _ = check_link_interval.tick() => self.maintain_membership().await
@@ -369,6 +360,7 @@ impl SessionRuntime {
                         send: tx,
                         recv: rv,
                         msg_to_send: recv,
+                        close_handler: close_chain().lock().handler(2),
                     };
                     let mut is_old = false;
                     if self.links.read().await.contains_key(&link.id()) {
@@ -451,6 +443,7 @@ impl SessionRuntime {
                             send: tx,
                             recv: rv,
                             msg_to_send: recv,
+                            close_handler: close_chain().lock().handler(2),
                         };
                         let id = link.id();
                         tokio::spawn(link.handle());

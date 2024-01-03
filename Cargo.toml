@@ -19,8 +19,9 @@ bitflags = "2.4"
 clap = { version = "4.4", features = ["derive"] }
 color-eyre = "0.6"
 common_x = { version = "0.3", default-features = false, features = [
-    "cert",
+    "tls",
     "config",
+    "graceful",
     "log",
     "signal",
 ] }

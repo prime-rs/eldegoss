@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use common_x::graceful_shutdown::CloseHandler;
 use flume::Receiver;
 use quinn::{Connection, RecvStream, SendStream};
 use tokio::select;
@@ -14,6 +15,7 @@ pub(crate) struct Link {
     pub(crate) send: SendStream,
     pub(crate) recv: RecvStream,
     pub(crate) session: SessionRuntime,
+    pub(crate) close_handler: CloseHandler,
 }
 
 impl Link {
@@ -30,6 +32,7 @@ impl Link {
             send,
             session,
             msg_to_send,
+            mut close_handler,
         } = self;
 
         select! {
@@ -39,7 +42,7 @@ impl Link {
             _ = writer(msg_to_send, send) => {
                 connection.close(0_u32.into(), b"close by write msg error");
             }
-            _ = session.close_channel.1.recv_async() => {
+            _ = close_handler.handle_async() => {
                 connection.close(0_u32.into(), b"Active shutdown");
                 info!("Link({id}): Active shutdown");
             }

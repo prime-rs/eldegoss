@@ -8,7 +8,7 @@ use eldegoss::{
     util::Args,
 };
 use tokio::select;
-use tracing::info;
+use tracing::{debug, info};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 30)]
 async fn main() -> Result<()> {
@@ -17,12 +17,12 @@ async fn main() -> Result<()> {
     let config: Config = common_x::configure::file_config(&args.config)?;
     info!("id: {}", config.id);
 
-    let (tx, rv) = flume::bounded(10240);
     let callback = vec![Subscriber::new("topic", move |net_msg| {
-        info!("net_msg: {:?}", net_msg);
+        debug!("net_msg: {:?}", net_msg);
     })];
 
-    let session = Session::serve(config, rv, callback).await;
+    let session = Session::serve(config, callback).await;
+    let sender = session.sender();
 
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
     let mut count = 0;
@@ -30,14 +30,14 @@ async fn main() -> Result<()> {
         select! {
             _ = interval.tick() => {
                 let msg = Message::put("topic", vec![count]);
-                tx.send_async(msg).await.ok();
+                sender.send_async(msg).await.ok();
                 count += 1;
                 if count == 100 {
                     count = 0;
                 }
 
                 session.membership().await.iter().for_each(|(eid, meta_data)| {
-                    info!("member({eid}): {meta_data:?}", );
+                    debug!("member({eid}): {meta_data:?}", );
                 });
             }
             _ = shutdown_signal() => {
