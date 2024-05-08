@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use color_eyre::Result;
 
 use common_x::{signal::shutdown_signal, tls::create_any_server_name_config};
-use quinn::{ClientConfig, Endpoint, TransportConfig};
+use quinn::{crypto::rustls::QuicClientConfig, ClientConfig, Endpoint, TransportConfig};
 use tokio::select;
 use tracing::info;
 
@@ -13,7 +13,8 @@ async fn main() -> Result<()> {
 
     let client_crypto = create_any_server_name_config("./config/cert/ca_cert.pem")?;
 
-    let mut client_config = ClientConfig::new(Arc::new(client_crypto));
+    let quic_config: QuicClientConfig = client_crypto.try_into().unwrap();
+    let mut client_config = ClientConfig::new(Arc::new(quic_config));
     let mut transport_config = TransportConfig::default();
     transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
     client_config.transport_config(Arc::new(transport_config));

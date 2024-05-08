@@ -35,10 +35,6 @@ async fn main() -> Result<()> {
                 if count == 100 {
                     count = 0;
                 }
-
-                session.membership().await.iter().for_each(|(eid, meta_data)| {
-                    debug!("member({eid}): {meta_data:?}", );
-                });
             }
             _ = shutdown_signal() => {
                 info!("shutdown");

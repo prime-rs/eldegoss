@@ -1,7 +1,7 @@
-use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::hash::Hash;
 
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::session::id_u128;
@@ -111,20 +111,12 @@ impl Member {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Membership {
-    member_map: HashMap<EldegossId, Vec<u8>>,
+    member_map: DashMap<EldegossId, Vec<u8>>,
 }
 
 impl Membership {
     pub fn contains(&self, id: &EldegossId) -> bool {
         self.member_map.contains_key(id)
-    }
-
-    pub fn get(&self, id: &EldegossId) -> Option<&Vec<u8>> {
-        self.member_map.get(id)
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (&EldegossId, &Vec<u8>)> {
-        self.member_map.iter()
     }
 
     pub fn len(&self) -> usize {
@@ -135,18 +127,19 @@ impl Membership {
         self.member_map.is_empty()
     }
 
-    pub(crate) fn merge(&mut self, other: &Self) {
-        self.member_map.extend(other.member_map.clone());
-        debug!("after merge: {:#?}", self.member_map);
+    pub(crate) fn merge(&self, other: &Self) {
+        for o in other.member_map.iter() {
+            self.member_map.insert(*o.key(), o.value().clone());
+        }
     }
 
-    pub(crate) fn add_member(&mut self, member: Member) {
+    pub(crate) fn add_member(&self, member: Member) {
         debug!("add member: {:?}", member);
         self.member_map.insert(member.id, member.meta_data);
         debug!("after add: {:#?}", self.member_map);
     }
 
-    pub(crate) fn remove_member(&mut self, id: EldegossId) {
+    pub(crate) fn remove_member(&self, id: EldegossId) {
         if id_u128() == id.to_u128() {
             info!("cant remove self");
             return;
@@ -160,63 +153,48 @@ impl Membership {
 #[tokio::test]
 async fn cert() {
     use common_x::{
-        file::{create_file, read_file_to_string},
-        tls::{ca_cert, create_csr, restore_ca_cert, sign_csr},
+        file::create_file,
+        tls::{new_ca, new_end_entity},
     };
     // ca
-    let (_, ca_cert_pem, ca_key_pem) = ca_cert();
-    create_file("./config/cert/ca_cert.pem", ca_cert_pem.as_bytes())
+    let (ca_cert, ca_key_pair) = new_ca();
+    create_file("./config/cert/ca_cert.pem", ca_cert.pem().as_bytes())
         .await
         .unwrap();
-    create_file("./config/cert/ca_key.pem", ca_key_pem.as_bytes())
-        .await
-        .unwrap();
+    create_file(
+        "./config/cert/ca_key.pem",
+        ca_key_pair.serialize_pem().as_bytes(),
+    )
+    .await
+    .unwrap();
 
-    // server csr
-    let (csr_pem, key_pem) = create_csr("test-host");
-    create_file("./config/cert/server_csr.pem", csr_pem.as_bytes())
-        .await
-        .unwrap();
-    create_file("./config/cert/server_key.pem", key_pem.as_bytes())
-        .await
-        .unwrap();
-    // server sign
-    let ca_cert_pem = read_file_to_string("./config/cert/ca_cert.pem")
-        .await
-        .unwrap();
-    let ca_key_pem = read_file_to_string("./config/cert/ca_key.pem")
-        .await
-        .unwrap();
-    let ca = restore_ca_cert(&ca_cert_pem, &ca_key_pem);
-    let csr_pem = read_file_to_string("./config/cert/server_csr.pem")
-        .await
-        .unwrap();
-    let cert_pem = sign_csr(&csr_pem, &ca);
-    create_file("./config/cert/server_cert.pem", cert_pem.as_bytes())
-        .await
-        .unwrap();
+    // server cert
+    let (server_cert, server_key) = new_end_entity("test-host", &ca_cert, &ca_key_pair);
+    create_file(
+        "./config/cert/server_cert.pem",
+        server_cert.pem().as_bytes(),
+    )
+    .await
+    .unwrap();
+    create_file(
+        "./config/cert/server_key.pem",
+        server_key.serialize_pem().as_bytes(),
+    )
+    .await
+    .unwrap();
 
-    // client csr
-    let (csr_pem, key_pem) = create_csr("client.test-host");
-    create_file("./config/cert/client_csr.pem", csr_pem.as_bytes())
-        .await
-        .unwrap();
-    create_file("./config/cert/client_key.pem", key_pem.as_bytes())
-        .await
-        .unwrap();
-    // client sign
-    let ca_cert_pem = read_file_to_string("./config/cert/ca_cert.pem")
-        .await
-        .unwrap();
-    let ca_key_pem = read_file_to_string("./config/cert/ca_key.pem")
-        .await
-        .unwrap();
-    let ca = restore_ca_cert(&ca_cert_pem, &ca_key_pem);
-    let csr_pem = read_file_to_string("./config/cert/client_csr.pem")
-        .await
-        .unwrap();
-    let cert_pem = sign_csr(&csr_pem, &ca);
-    create_file("./config/cert/client_cert.pem", cert_pem.as_bytes())
-        .await
-        .unwrap();
+    // client cert
+    let (client_cert, client_key) = new_end_entity("client.test-host", &ca_cert, &ca_key_pair);
+    create_file(
+        "./config/cert/client_cert.pem",
+        client_cert.pem().as_bytes(),
+    )
+    .await
+    .unwrap();
+    create_file(
+        "./config/cert/client_key.pem",
+        client_key.serialize_pem().as_bytes(),
+    )
+    .await
+    .unwrap();
 }

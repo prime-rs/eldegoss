@@ -15,8 +15,8 @@ async fn main() -> Result<()> {
     common_x::log::init_log_filter("info");
 
     let mut server_config = ServerConfig::with_single_cert(
-        read_certs(&"./config/cert/client_cert.pem".into())?,
-        read_key(&"./config/cert/client_key.pem".into())?,
+        read_certs("./config/cert/client_cert.pem")?,
+        read_key("./config/cert/client_key.pem")?,
     )?;
     let mut transport_config = TransportConfig::default();
     transport_config.keep_alive_interval(Some(Duration::from_secs(5)));

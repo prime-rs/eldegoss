@@ -8,7 +8,10 @@ use std::{
 use color_eyre::{eyre::eyre, Result};
 use flume::{Receiver, Sender};
 use mini_moka::sync::Cache;
-use quinn::{ClientConfig, Connecting, Connection, Endpoint, ServerConfig, TransportConfig};
+use quinn::{
+    crypto::rustls::QuicClientConfig, ClientConfig, Connection, Endpoint, Incoming, ServerConfig,
+    TransportConfig,
+};
 use tokio::sync::{Mutex, RwLock};
 
 use common_x::{
@@ -52,6 +55,21 @@ pub fn id_u128() -> u128 {
     *ID.get_or_init(|| 1u128)
 }
 
+#[test]
+fn test_hlc() {
+    let hlc = HLCBuilder::new()
+        .with_id(uhlc::ID::try_from(u128::MAX).unwrap())
+        .build();
+    let hlc1 = HLCBuilder::new()
+        .with_id(uhlc::ID::try_from(1u128).unwrap())
+        .build();
+    let t = hlc.new_timestamp();
+    let t1 = hlc1.new_timestamp();
+    println!("{t}");
+    println!("{t1}");
+    assert!(t1 > t);
+}
+
 type MsgForRecv = (Sender<Message>, Receiver<Message>);
 
 pub struct Subscriber {
@@ -73,7 +91,7 @@ impl Subscriber {
 
 pub struct Session {
     pub(crate) sender: Sender<Message>,
-    pub(crate) membership: Arc<Mutex<Membership>>,
+    pub(crate) membership: Arc<Membership>,
     pub(crate) close_handler: CloseHandler,
 }
 
@@ -118,8 +136,8 @@ impl Session {
         self.sender.clone()
     }
 
-    pub async fn membership(&self) -> tokio::sync::MutexGuard<'_, Membership> {
-        self.membership.lock().await
+    pub fn membership(&self) -> Arc<Membership> {
+        self.membership.clone()
     }
 }
 
@@ -128,7 +146,7 @@ pub(crate) struct SessionRuntime {
     pub(crate) msg_for_recv: MsgForRecv,
     pub(crate) msg_for_send: Receiver<Message>,
     pub(crate) links: Arc<RwLock<HashMap<EldegossId, Sender<Arc<Sample>>>>>,
-    pub(crate) membership: Arc<Mutex<Membership>>,
+    pub(crate) membership: Arc<Membership>,
     pub(crate) connected_locators: Arc<Mutex<HashSet<String>>>,
     pub(crate) check_member_list: Arc<Mutex<Vec<EldegossId>>>,
     pub(crate) wait_for_remove_member_list: Arc<Mutex<Vec<EldegossId>>>,
@@ -139,7 +157,7 @@ impl SessionRuntime {
     fn init(config_: Config, msg_for_send: Receiver<Message>) -> Self {
         init_config(config_);
         let member = Member::new(id_u128().into(), vec![]);
-        let mut membership = Membership::default();
+        let membership = Membership::default();
         membership.add_member(member);
 
         // cache
@@ -152,7 +170,7 @@ impl SessionRuntime {
         Self {
             msg_for_recv: flume::unbounded(),
             links: Default::default(),
-            membership: Arc::new(Mutex::new(membership)),
+            membership: Arc::new(membership),
             connected_locators: Default::default(),
             check_member_list: Default::default(),
             wait_for_remove_member_list: Default::default(),
@@ -219,8 +237,8 @@ impl SessionRuntime {
         } = &config();
 
         let client_crypto = create_any_server_name_config(ca_path)?;
-
-        let mut client_config = ClientConfig::new(Arc::new(client_crypto));
+        let quic_config: QuicClientConfig = client_crypto.try_into().unwrap();
+        let mut client_config = ClientConfig::new(Arc::new(quic_config));
         let mut transport_config = TransportConfig::default();
         transport_config.keep_alive_interval(Some(Duration::from_secs(*keep_alive_interval)));
         client_config.transport_config(Arc::new(transport_config));
@@ -285,11 +303,9 @@ impl SessionRuntime {
             private_key_path,
             check_link_interval,
             ..
-        } = &config();
-        let mut server_config = ServerConfig::with_single_cert(
-            read_certs(&cert_path.into())?,
-            read_key(&private_key_path.into())?,
-        )?;
+        } = config();
+        let mut server_config =
+            ServerConfig::with_single_cert(read_certs(cert_path)?, read_key(private_key_path)?)?;
         let mut transport_config = TransportConfig::default();
         transport_config.keep_alive_interval(Some(Duration::from_secs(*keep_alive_interval)));
         server_config.transport_config(Arc::new(transport_config));
@@ -340,7 +356,7 @@ impl SessionRuntime {
                 {
                     let origin = msg.origin();
                     {
-                        self.membership.lock().await.merge(membership);
+                        self.membership.as_ref().merge(membership);
                     }
 
                     if *is_existed {
@@ -384,7 +400,7 @@ impl SessionRuntime {
         }
     }
 
-    async fn handle_join_request(self, connecting: Connecting) -> Result<()> {
+    async fn handle_join_request(self, connecting: Incoming) -> Result<()> {
         match connecting.await {
             Ok(connection) => {
                 let remote_address = connection.remote_address();
@@ -404,13 +420,16 @@ impl SessionRuntime {
                             true
                         };
 
-                        let membership = self.membership.lock().await.clone();
+                        let membership = self.membership.clone();
                         debug!("memberlist: {membership:#?}");
 
                         if !is_new && !is_reconnect {
                             write_msg(
                                 &mut tx,
-                                Sample::control(origin, Command::JoinRsp((true, membership))),
+                                Sample::control(
+                                    origin,
+                                    Command::JoinRsp((true, membership.as_ref().clone())),
+                                ),
                             )
                             .await
                             .ok();
@@ -421,14 +440,17 @@ impl SessionRuntime {
 
                         write_msg(
                             &mut tx,
-                            Sample::control(origin, Command::JoinRsp((false, membership))),
+                            Sample::control(
+                                origin,
+                                Command::JoinRsp((false, membership.as_ref().clone())),
+                            ),
                         )
                         .await
                         .ok();
 
                         let member = Member::new(origin.into(), meta_data.to_vec());
                         {
-                            self.membership.lock().await.add_member(member.clone());
+                            self.membership.add_member(member.clone());
                         }
 
                         self.send_msg(Sample::control(0, Command::AddMember(member)))
@@ -540,10 +562,10 @@ impl SessionRuntime {
     async fn handle_recv_msg(&self, msg: &Sample) {
         match &msg.payload {
             Payload::Control(Command::AddMember(member)) => {
-                self.membership.lock().await.add_member(member.clone());
+                self.membership.add_member(member.clone());
             }
             Payload::Control(Command::RemoveMember(id)) => {
-                self.membership.lock().await.remove_member((*id).into());
+                self.membership.remove_member((*id).into());
             }
             Payload::Control(Command::CheckReq(check_id)) => {
                 let result = id_u128() == *check_id
@@ -606,7 +628,7 @@ impl SessionRuntime {
             {
                 while let Some(remove_id) = self.wait_for_remove_member_list.lock().await.pop() {
                     info!("remove member: {}", remove_id);
-                    self.membership.lock().await.remove_member(remove_id);
+                    self.membership.remove_member(remove_id);
                     remove_ids.push(remove_id);
                 }
             }
