@@ -15,7 +15,6 @@ async fn main() -> Result<()> {
     common_x::log::init_log_filter("info");
     let args = Args::parse();
     let config: Config = common_x::configure::file_config(&args.config)?;
-    info!("id: {}", config.id);
 
     let callback = vec![Subscriber::new("topic", move |net_msg| {
         debug!("net_msg: {:?}", net_msg);
@@ -29,7 +28,7 @@ async fn main() -> Result<()> {
     loop {
         select! {
             _ = interval.tick() => {
-                let msg = Message::put("topic", vec![count]);
+                let msg = Message::push("topic", vec![count]);
                 sender.send_async(msg).await.ok();
                 count += 1;
                 if count == 100 {

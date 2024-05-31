@@ -63,7 +63,7 @@ async fn reader(session: SessionRuntime, id: EldegossId, mut recv: RecvStream) {
         match read_msg(&mut recv).await {
             Ok(msg) => {
                 let id = id.to_u128();
-                session.dispatch(msg, id).await;
+                session.dispatch(msg.into(), id).await;
             }
             Err(e) => {
                 warn!("link handle recv msg failed: {e}");
