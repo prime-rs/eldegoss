@@ -25,7 +25,7 @@ use crate::{
     config::Config,
     link::Link,
     protocol::{Command, Message, Payload, Sample},
-    util::{read_msg, write_msg},
+    util::{is_match, read_msg, write_msg},
     EldegossId, Member, Membership,
 };
 
@@ -73,17 +73,17 @@ fn test_hlc() {
 type MsgForRecv = (Sender<Message>, Receiver<Message>);
 
 pub struct Subscriber {
-    pub topic: String,
+    pub key_expr: String,
     pub callback: Box<dyn FnMut(Message) + Send + Sync + 'static>,
 }
 
 impl Subscriber {
-    pub fn new<C>(topic: &str, callback: C) -> Self
+    pub fn new<C>(key_expr: &str, callback: C) -> Self
     where
         C: FnMut(Message) + Send + Sync + 'static,
     {
         Self {
-            topic: topic.to_owned(),
+            key_expr: key_expr.to_owned(),
             callback: Box::new(callback),
         }
     }
@@ -188,11 +188,11 @@ impl SessionRuntime {
     async fn handle_recv(&self, subscribers: Vec<Subscriber>) {
         let mut subscribers = subscribers
             .into_iter()
-            .map(|subscriber| (subscriber.topic, subscriber.callback))
+            .map(|subscriber| (subscriber.key_expr, subscriber.callback))
             .collect::<HashMap<_, _>>();
 
         while let Ok(msg) = self.msg_for_recv.1.recv_async().await {
-            if let Some(callback) = subscribers.get_mut(&msg.topic) {
+            if let Some(callback) = subscribers.get_mut(&msg.key_expr) {
                 callback(msg);
             }
         }
@@ -201,29 +201,13 @@ impl SessionRuntime {
     #[inline]
     async fn send_msg(&self, msg: Sample) {
         let msg = Arc::new(msg);
-        if msg.to != 0 {
-            let mut links = self.links.write().await;
-            if let Some(link) = links.get(&msg.to.into()) {
-                let to = msg.to.into();
-                if link
-                    .send_timeout(msg.clone(), Duration::from_millis(500))
-                    .is_err()
-                {
-                    links.remove(&to);
-                } else {
-                    return;
-                }
-            }
-        }
         self.gossip_msg(msg, 0).await;
     }
 
     #[inline]
     async fn to_recv_msg(&self, msg: &Sample) {
-        if let Payload::Message(_) = msg.payload {
-            if let Err(e) = self.msg_for_recv.0.send_async(msg.message()).await {
-                debug!("to_recv_msg failed: {:?}", e);
-            }
+        if let Err(e) = self.msg_for_recv.0.send_async(msg.message()).await {
+            debug!("to_recv_msg failed: {:?}", e);
         }
     }
 
@@ -346,7 +330,6 @@ impl SessionRuntime {
                 write_msg(
                     &mut tx,
                     Sample::control(
-                        0,
                         Command::JoinReq(vec![]),
                     ),
                 )
@@ -426,10 +409,10 @@ impl SessionRuntime {
                         if !is_new && !is_reconnect {
                             write_msg(
                                 &mut tx,
-                                Sample::control(
-                                    origin,
-                                    Command::JoinRsp((true, membership.lock().await.clone())),
-                                ),
+                                Sample::control(Command::JoinRsp((
+                                    true,
+                                    membership.as_ref().clone(),
+                                ))),
                             )
                             .await
                             .ok();
@@ -440,10 +423,7 @@ impl SessionRuntime {
 
                         write_msg(
                             &mut tx,
-                            Sample::control(
-                                origin,
-                                Command::JoinRsp((false, membership.lock().await.clone())),
-                            ),
+                            Sample::control(Command::JoinRsp((false, membership.as_ref().clone()))),
                         )
                         .await
                         .ok();
@@ -453,7 +433,7 @@ impl SessionRuntime {
                             self.membership.lock().await.add_member(member.clone());
                         }
 
-                        self.send_msg(Sample::control(0, Command::AddMember(member)))
+                        self.send_msg(Sample::control(Command::AddMember(member)))
                             .await;
 
                         let (send, recv) = flume::bounded(1024);
@@ -506,56 +486,23 @@ impl SessionRuntime {
     }
 
     #[inline]
-    pub(crate) async fn dispatch(&self, msg: Sample, received_from: u128) {
-        // debug!("dispatch({received_from}) msg: {:?}", msg);
+    pub(crate) async fn dispatch(&self, msg: Arc<Sample>, received_from: u128) {
         if self.cache.contains_key(&msg.timestamp) {
-            // debug!("duplicate msg: {:?}", msg.timestamp);
+            debug!("duplicate msg: {:?}", msg.timestamp);
             return;
         }
-        let msg = Arc::new(msg);
         self.cache.insert(msg.timestamp, ());
-        match (msg.to, msg.topic.as_str()) {
-            (0, "") => {
-                self.gossip_msg(msg.clone(), received_from).await;
-                self.handle_recv_msg(&msg).await;
-            }
-            (0, topic) => {
-                self.gossip_msg(msg.clone(), received_from).await;
 
-                if config().subscription_list.contains(&topic.to_owned()) {
-                    self.to_recv_msg(&msg).await;
-                }
-            }
-            (to, "") => {
-                if to == id_u128() {
-                    self.handle_recv_msg(&msg).await;
-                } else {
-                    let mut send_err = false;
-                    let mut links = self.links.write().await;
-                    if let Some(link) = links.get(&to.into()) {
-                        if link
-                            .send_timeout(msg.clone(), Duration::from_millis(500))
-                            .is_err()
-                        {
-                            links.remove(&to.into());
-                            send_err = true;
-                        }
-                    }
-                    if send_err {
-                        self.gossip_msg(msg.clone(), received_from).await;
-                    }
-                }
-            }
-            (to, topic) => {
-                if to == id_u128() {
-                    if config().subscription_list.contains(&topic.to_owned()) {
-                        self.to_recv_msg(&msg).await;
-                    }
-                } else {
-                    self.gossip_msg(msg.clone(), received_from).await;
-                }
-            }
+        if config()
+            .subscription_list
+            .iter()
+            .filter(|s| is_match(s, msg.key_expr.as_str()))
+            .count()
+            > 0
+        {
+            self.handle_recv_msg(&msg).await;
         }
+        self.gossip_msg(msg, received_from).await;
     }
 
     #[inline]
@@ -571,7 +518,7 @@ impl SessionRuntime {
                 let result = id_u128() == *check_id
                     || self.links.read().await.contains_key(&(*check_id).into());
                 debug!("check member: {} result: {}", check_id, result);
-                let msg = Sample::control(0, Command::CheckRsp(*check_id, result));
+                let msg = Sample::control(Command::CheckRsp(*check_id, result));
                 self.send_msg(msg).await;
             }
             Payload::Control(Command::CheckRsp(id, result)) => {
@@ -634,11 +581,8 @@ impl SessionRuntime {
             }
 
             for remove_id in remove_ids {
-                self.send_msg(Sample::control(
-                    0,
-                    Command::RemoveMember(remove_id.to_u128()),
-                ))
-                .await;
+                self.send_msg(Sample::control(Command::RemoveMember(remove_id.to_u128())))
+                    .await;
             }
         }
 
@@ -653,7 +597,7 @@ impl SessionRuntime {
                 };
                 if let Some(check_id) = check_id {
                     info!("check member: {}", check_id);
-                    self.send_msg(Sample::control(0, Command::CheckReq(check_id.to_u128())))
+                    self.send_msg(Sample::control(Command::CheckReq(check_id.to_u128())))
                         .await;
                 } else {
                     break;
