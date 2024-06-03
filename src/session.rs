@@ -91,7 +91,7 @@ impl Subscriber {
 
 pub struct Session {
     pub(crate) sender: Sender<Message>,
-    pub(crate) membership: Arc<Membership>,
+    pub(crate) membership: Arc<Mutex<Membership>>,
     pub(crate) close_handler: CloseHandler,
 }
 
@@ -136,8 +136,8 @@ impl Session {
         self.sender.clone()
     }
 
-    pub fn membership(&self) -> Arc<Membership> {
-        self.membership.clone()
+    pub async fn membership(&self) -> tokio::sync::MutexGuard<'_, Membership> {
+        self.membership.lock().await
     }
 }
 
@@ -146,7 +146,7 @@ pub(crate) struct SessionRuntime {
     pub(crate) msg_for_recv: MsgForRecv,
     pub(crate) msg_for_send: Receiver<Message>,
     pub(crate) links: Arc<RwLock<HashMap<EldegossId, Sender<Arc<Sample>>>>>,
-    pub(crate) membership: Arc<Membership>,
+    pub(crate) membership: Arc<Mutex<Membership>>,
     pub(crate) connected_locators: Arc<Mutex<HashSet<String>>>,
     pub(crate) check_member_list: Arc<Mutex<Vec<EldegossId>>>,
     pub(crate) wait_for_remove_member_list: Arc<Mutex<Vec<EldegossId>>>,
@@ -157,7 +157,7 @@ impl SessionRuntime {
     fn init(config_: Config, msg_for_send: Receiver<Message>) -> Self {
         init_config(config_);
         let member = Member::new(id_u128().into(), vec![]);
-        let membership = Membership::default();
+        let mut membership = Membership::default();
         membership.add_member(member);
 
         // cache
@@ -170,7 +170,7 @@ impl SessionRuntime {
         Self {
             msg_for_recv: flume::unbounded(),
             links: Default::default(),
-            membership: Arc::new(membership),
+            membership: Arc::new(Mutex::new(membership)),
             connected_locators: Default::default(),
             check_member_list: Default::default(),
             wait_for_remove_member_list: Default::default(),
@@ -356,7 +356,7 @@ impl SessionRuntime {
                 {
                     let origin = msg.origin();
                     {
-                        self.membership.as_ref().merge(membership);
+                        self.membership.lock().await.merge(membership);
                     }
 
                     if *is_existed {
@@ -428,7 +428,7 @@ impl SessionRuntime {
                                 &mut tx,
                                 Sample::control(
                                     origin,
-                                    Command::JoinRsp((true, membership.as_ref().clone())),
+                                    Command::JoinRsp((true, membership.lock().await.clone())),
                                 ),
                             )
                             .await
@@ -442,7 +442,7 @@ impl SessionRuntime {
                             &mut tx,
                             Sample::control(
                                 origin,
-                                Command::JoinRsp((false, membership.as_ref().clone())),
+                                Command::JoinRsp((false, membership.lock().await.clone())),
                             ),
                         )
                         .await
@@ -450,7 +450,7 @@ impl SessionRuntime {
 
                         let member = Member::new(origin.into(), meta_data.to_vec());
                         {
-                            self.membership.add_member(member.clone());
+                            self.membership.lock().await.add_member(member.clone());
                         }
 
                         self.send_msg(Sample::control(0, Command::AddMember(member)))
@@ -562,10 +562,10 @@ impl SessionRuntime {
     async fn handle_recv_msg(&self, msg: &Sample) {
         match &msg.payload {
             Payload::Control(Command::AddMember(member)) => {
-                self.membership.add_member(member.clone());
+                self.membership.lock().await.add_member(member.clone());
             }
             Payload::Control(Command::RemoveMember(id)) => {
-                self.membership.remove_member((*id).into());
+                self.membership.lock().await.remove_member((*id).into());
             }
             Payload::Control(Command::CheckReq(check_id)) => {
                 let result = id_u128() == *check_id
@@ -628,7 +628,7 @@ impl SessionRuntime {
             {
                 while let Some(remove_id) = self.wait_for_remove_member_list.lock().await.pop() {
                     info!("remove member: {}", remove_id);
-                    self.membership.remove_member(remove_id);
+                    self.membership.lock().await.remove_member(remove_id);
                     remove_ids.push(remove_id);
                 }
             }
