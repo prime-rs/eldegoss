@@ -1,7 +1,7 @@
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::hash::Hash;
 
-use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::session::id_u128;
@@ -111,12 +111,20 @@ impl Member {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Membership {
-    member_map: DashMap<EldegossId, Vec<u8>>,
+    member_map: HashMap<EldegossId, Vec<u8>>,
 }
 
 impl Membership {
     pub fn contains(&self, id: &EldegossId) -> bool {
         self.member_map.contains_key(id)
+    }
+
+    pub fn get(&self, id: &EldegossId) -> Option<&Vec<u8>> {
+        self.member_map.get(id)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&EldegossId, &Vec<u8>)> {
+        self.member_map.iter()
     }
 
     pub fn len(&self) -> usize {
@@ -127,19 +135,18 @@ impl Membership {
         self.member_map.is_empty()
     }
 
-    pub(crate) fn merge(&self, other: &Self) {
-        for o in other.member_map.iter() {
-            self.member_map.insert(*o.key(), o.value().clone());
-        }
+    pub(crate) fn merge(&mut self, other: &Self) {
+        self.member_map.extend(other.member_map.clone());
+        debug!("after merge: {:#?}", self.member_map);
     }
 
-    pub(crate) fn add_member(&self, member: Member) {
+    pub(crate) fn add_member(&mut self, member: Member) {
         debug!("add member: {:?}", member);
         self.member_map.insert(member.id, member.meta_data);
         debug!("after add: {:#?}", self.member_map);
     }
 
-    pub(crate) fn remove_member(&self, id: EldegossId) {
+    pub(crate) fn remove_member(&mut self, id: EldegossId) {
         if id_u128() == id.to_u128() {
             info!("cant remove self");
             return;

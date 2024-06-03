@@ -6,6 +6,7 @@ use common_x::{
     signal::shutdown_signal,
     tls::{read_certs, read_key},
 };
+use eldegoss::protocol::Message;
 use quinn::{Endpoint, ServerConfig, TransportConfig};
 use tokio::select;
 use tracing::info;
@@ -33,9 +34,12 @@ async fn main() -> Result<()> {
 
     let mut stats = eldegoss::util::Stats::new(10000);
 
-    let msg_bytes = vec![0; 1024];
+    let msg = Message::push("topic", vec![0; 1024]);
+    let msg_bytes = msg.sample().encode();
+    info!("bytes len: {:?}", msg_bytes.len());
     let bytes = (msg_bytes.len() as u32).to_le_bytes().to_vec();
     let bytes = [bytes, msg_bytes].concat();
+
     loop {
         select! {
             _ = tx.write_all(&bytes) => {
