@@ -105,7 +105,7 @@ impl Message {
     }
 
     #[inline]
-    pub(crate) fn sample(self) -> Sample {
+    pub fn sample(self) -> Sample {
         Sample {
             key_expr: self.key_expr,
             payload: self.payload,
@@ -127,7 +127,7 @@ pub enum Payload {
 }
 
 #[derive(Debug)]
-pub(crate) struct Sample {
+pub struct Sample {
     pub timestamp: Timestamp,
     pub key_expr: String,
     pub payload: Payload,
@@ -157,7 +157,7 @@ impl Sample {
 
 impl Sample {
     #[inline]
-    pub(crate) fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         let timestamp = self.timestamp;
         match &self.payload {
@@ -215,7 +215,7 @@ impl Sample {
     }
 
     #[inline]
-    pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
         let flags = Flags::from_repr(bytes[0]).context("invalid flag")?;
         let id = u128::from_le_bytes(bytes[1..17].try_into()?);
         let time = u64::from_be_bytes(bytes[17..25].try_into()?);

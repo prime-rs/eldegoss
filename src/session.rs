@@ -411,7 +411,7 @@ impl SessionRuntime {
                                 &mut tx,
                                 Sample::control(Command::JoinRsp((
                                     true,
-                                    membership.as_ref().clone(),
+                                    membership.lock().await.clone(),
                                 ))),
                             )
                             .await
@@ -423,7 +423,10 @@ impl SessionRuntime {
 
                         write_msg(
                             &mut tx,
-                            Sample::control(Command::JoinRsp((false, membership.as_ref().clone()))),
+                            Sample::control(Command::JoinRsp((
+                                false,
+                                membership.lock().await.clone(),
+                            ))),
                         )
                         .await
                         .ok();
