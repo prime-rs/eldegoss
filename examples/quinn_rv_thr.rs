@@ -3,6 +3,7 @@ use std::{sync::Arc, time::Duration};
 use color_eyre::Result;
 
 use common_x::{signal::shutdown_signal, tls::create_any_server_name_config};
+use eldegoss::protocol::Sample;
 use quinn::{crypto::rustls::QuicClientConfig, ClientConfig, Endpoint, TransportConfig};
 use tokio::select;
 use tracing::info;
@@ -33,10 +34,14 @@ async fn main() -> Result<()> {
 
     let mut stats = eldegoss::util::Stats::new(10000);
 
-    let bytes = &mut vec![0_u8; 1028];
+    let mut bytes = [0_u8; 4];
     loop {
         select! {
-            _ = rv.read_exact(bytes) => {
+            _ = rv.read_exact(&mut bytes) => {
+                let n = u32::from_le_bytes(bytes) as usize;
+                let msg = &mut vec![0_u8; n];
+                rv.read_exact(msg).await?;
+                let _ = Sample::decode(msg);
                 stats.increment();
             }
             _ = conn.closed() => {

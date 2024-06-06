@@ -13,6 +13,20 @@ pub struct Args {
     pub config: String,
 }
 
+#[inline]
+pub(crate) fn is_match(re: &str, haystack: &str) -> bool {
+    if re.eq(haystack) {
+        return true;
+    }
+    if let Ok(r) = regex::Regex::new(re) {
+        r.is_match(haystack)
+    } else if let Ok(haystack) = regex::Regex::new(haystack) {
+        haystack.is_match(re)
+    } else {
+        false
+    }
+}
+
 #[derive(Debug)]
 pub struct Stats {
     round_count: usize,

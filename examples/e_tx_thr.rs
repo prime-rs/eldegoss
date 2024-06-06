@@ -11,7 +11,7 @@ use tracing::info;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 30)]
 async fn main() -> Result<()> {
-    common_x::log::init_log_filter("info");
+    common_x::log::init_log_filter("debug");
     let args = Args::parse();
     let config: Config = common_x::configure::file_config(&args.config)?;
 
@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
 
     let sender_handle = tokio::spawn(async move {
         loop {
-            let msg = Message::put("topic", vec![0; 1024]);
+            let msg = Message::push("topic", vec![0; 1024]);
             sender.send_async(msg).await.ok();
         }
     });
