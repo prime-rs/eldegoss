@@ -8,7 +8,7 @@ use eldegoss::{
 };
 use tracing::info;
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 30)]
+#[tokio::main]
 async fn main() -> Result<()> {
     common_x::log::init_log_filter("debug");
     let args = Args::parse();
