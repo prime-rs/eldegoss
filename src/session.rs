@@ -288,8 +288,10 @@ impl SessionRuntime {
             check_link_interval,
             ..
         } = config();
-        let mut server_config =
-            ServerConfig::with_single_cert(read_certs(cert_path)?, read_key(private_key_path)?)?;
+        let mut server_config = ServerConfig::with_single_cert(
+            read_certs(cert_path.to_string())?,
+            read_key(private_key_path.to_string())?,
+        )?;
         let mut transport_config = TransportConfig::default();
         transport_config.keep_alive_interval(Some(Duration::from_secs(*keep_alive_interval)));
         server_config.transport_config(Arc::new(transport_config));
