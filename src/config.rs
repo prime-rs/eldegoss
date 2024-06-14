@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use crate::EldegossId;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[serde(deny_unknown_fields)]
@@ -10,6 +8,7 @@ pub struct Config {
 
     pub listen: String,
     pub connect: Vec<String>,
+    pub announce: Vec<String>,
 
     pub ca_path: String,
     pub cert_path: String,
@@ -27,7 +26,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            id: Into::<EldegossId>::into(rand::random::<u128>()).hex(),
+            id: uhlc::ID::rand().to_string(),
+            announce: Default::default(),
             ca_path: Default::default(),
             connect: Default::default(),
             listen: Default::default(),

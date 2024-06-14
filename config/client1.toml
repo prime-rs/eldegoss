@@ -1,0 +1,8 @@
+id = "1bc1"
+listen = "[::]:9001"
+connect = ["127.0.0.1:9000"]
+announce = ["1bc0"]
+cert_path = "./config/cert/client_cert.pem"
+private_key_path = "./config/cert/client_key.pem"
+ca_path = "./config/cert/ca_cert.pem"
+subscription_list = ["topic"]
