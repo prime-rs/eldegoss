@@ -70,21 +70,15 @@ impl MessageHeader {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Message {
     pub header: MessageHeader,
-    pub key_expr: String,
     pub payload: Bytes,
 }
 
 impl Message {
-    pub fn new(timestamp: Timestamp, key_expr: String, payload: Bytes) -> Self {
+    pub fn new(timestamp: Timestamp, payload: Bytes) -> Self {
         Self {
             header: MessageHeader::new(timestamp),
-            key_expr,
             payload,
         }
-    }
-
-    pub fn key_expr(&self) -> &str {
-        &self.key_expr
     }
 }
 

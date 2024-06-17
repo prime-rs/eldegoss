@@ -424,6 +424,7 @@ async fn gossip_msg(
 
     let sample = Sample::Message(msg.clone());
     for (eid, link) in link_pool.read().await.iter() {
+        // not send to origin and not send to received_from
         if eid != &received_from && eid != &origin {
             let link = link.clone();
             link.send(&sample).await.ok();

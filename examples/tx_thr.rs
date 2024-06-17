@@ -12,9 +12,7 @@ async fn main() -> Result<()> {
 
     let eldegoss = Eldegoss::serve(config).await?;
 
-    let mut index = 0;
     loop {
-        eldegoss.send(format!("{index}"), vec![0; 1024]).await.ok();
-        index += 1;
+        eldegoss.send(vec![0; 1024]).await.ok();
     }
 }
