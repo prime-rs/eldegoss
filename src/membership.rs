@@ -8,21 +8,21 @@ use bytes::Bytes;
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
 use common_x::graceful_shutdown::close_chain;
-use flume::{Receiver, Sender};
+use flume::Sender;
+use foca::NoCustomBroadcast;
 use foca::{BincodeCodec, Config as FocaConfig, Foca, Identity, Notification, Timer};
 use rand::{rngs::StdRng, SeedableRng};
 use tokio::sync::RwLock;
 use tokio::time::{sleep_until, Instant};
 use uhlc::ID;
 
-use crate::protocol::{EldegossId, Message, MessageHeader, Sample};
+use crate::protocol::{EldegossId, Sample};
 use crate::quic::Link;
 
 pub(crate) enum FocaEvent {
     Data(Bytes),
     Announce(EldegossId),
     Timer(Timer<EldegossId>),
-    Notification(Message),
 }
 
 impl Identity for EldegossId {
@@ -43,42 +43,6 @@ impl Identity for EldegossId {
 
     fn win_addr_conflict(&self, adversary: &Self) -> bool {
         self.clock() > adversary.clock()
-    }
-}
-
-impl foca::Invalidates for MessageHeader {
-    fn invalidates(&self, other: &Self) -> bool {
-        self.id() == other.id() && self.clock() > other.clock()
-    }
-}
-
-pub(crate) struct MessageHandler {
-    inbound_tx: Sender<Message>,
-}
-
-impl MessageHandler {
-    pub(crate) fn new(inbound_tx: Sender<Message>) -> Self {
-        Self { inbound_tx }
-    }
-}
-
-impl foca::BroadcastHandler<EldegossId> for MessageHandler {
-    type Key = MessageHeader;
-
-    type Error = String;
-
-    fn receive_item(
-        &mut self,
-        data: &[u8],
-        _sender: Option<&EldegossId>,
-    ) -> Result<Option<Self::Key>, Self::Error> {
-        let msg: Message =
-            bincode::deserialize(data).map_err(|err| format!("bad broadcast: {err}"))?;
-        let timestamp = msg.header.timestamp();
-
-        self.inbound_tx.send(msg).ok();
-
-        Ok(Some(MessageHeader::new(timestamp)))
     }
 }
 
@@ -181,45 +145,22 @@ impl TimerQueue {
 }
 
 pub(crate) type Membership =
-    Arc<RwLock<Foca<EldegossId, BincodeCodec<DefaultOptions>, StdRng, MessageHandler>>>;
+    Arc<RwLock<Foca<EldegossId, BincodeCodec<DefaultOptions>, StdRng, NoCustomBroadcast>>>;
 
 pub(crate) async fn start_foca(
     identity: EldegossId,
-    inbound_notification_tx: Sender<Message>,
-    outbound_notification_rv: Receiver<Message>,
     link_pool: Arc<RwLock<HashMap<ID, Arc<Link>>>>,
 ) -> Result<(Membership, Sender<FocaEvent>)> {
     let (foca_event_tx, foca_event_rv) = flume::bounded(1024);
     let (outbound_foca_data_tx, outbound_foca_data_rv) = flume::bounded(1024);
 
-    let foca = Arc::new(RwLock::new(Foca::with_custom_broadcast(
+    let foca = Arc::new(RwLock::new(Foca::new(
         identity.clone(),
         FocaConfig::simple(),
         StdRng::from_entropy(),
         BincodeCodec(bincode::DefaultOptions::new()),
-        MessageHandler::new(inbound_notification_tx.clone()),
     )));
     let membership = foca.clone();
-
-    let msg_tx_foca = foca_event_tx.clone();
-
-    tokio::spawn(async move {
-        let close_handler = close_chain().lock().handler(1);
-        loop {
-            tokio::select! {
-                Ok(notification) = outbound_notification_rv.recv_async() => {
-                    msg_tx_foca
-                        .send_async(FocaEvent::Notification(notification))
-                        .await
-                        .ok();
-                }
-                _ = close_handler.handle_async() => {
-                    info!("serve: Active shutdown");
-                    break;
-                }
-            }
-        }
-    });
 
     let scheduler = launch_scheduler(foca_event_tx.clone()).await;
 
@@ -242,14 +183,6 @@ pub(crate) async fn start_foca(
                     .await
                     .announce(dst, &mut runtime)
                     .map_err(|err| eyre!("Error announce: {err:?}")),
-                FocaEvent::Notification(msg) => {
-                    let bytes = bincode::serialize(&msg).unwrap();
-                    foca.write()
-                        .await
-                        .add_broadcast(&bytes)
-                        .map(|_| ())
-                        .map_err(|err| eyre!("Error adding broadcast: {err:?}"))
-                }
             };
 
             if let Err(error) = result {

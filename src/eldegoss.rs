@@ -27,8 +27,6 @@ pub struct Eldegoss {
     membership: Membership,
     inbound_msg_channel: MessageChannel,
     outbound_msg_channel: MessageChannel,
-    inbound_notification_channel: MessageChannel,
-    outbound_notification_channel: MessageChannel,
 }
 
 impl Eldegoss {
@@ -72,22 +70,6 @@ impl Eldegoss {
             .await
             .map_err(|err| eyre!("{err:?}"))
     }
-
-    pub async fn recv_notification(&self) -> Result<Message> {
-        self.inbound_notification_channel
-            .1
-            .recv_async()
-            .await
-            .map_err(|err| eyre!("{err:?}"))
-    }
-
-    pub async fn send_notification(&self, payload: Vec<u8>) -> Result<()> {
-        self.outbound_notification_channel
-            .0
-            .send_async(Message::new(self.hlc.new_timestamp(), payload.into()))
-            .await
-            .map_err(|err| eyre!("{err:?}"))
-    }
 }
 
 // serve
@@ -102,8 +84,6 @@ impl Eldegoss {
         let link_pool = Arc::new(RwLock::new(HashMap::new()));
         let connected_locators = Arc::new(Mutex::new(HashSet::new()));
 
-        let inbound_notification_channel = flume::bounded(1024);
-        let outbound_notification_channel = flume::bounded(1024);
         let inbound_msg_channel = flume::bounded(1024);
         let outbound_msg_channel = flume::bounded(1024);
 
@@ -114,13 +94,7 @@ impl Eldegoss {
             .time_to_live(Duration::from_secs(1))
             .build();
 
-        let (membership, foca_event_tx) = start_foca(
-            eid.clone(),
-            inbound_notification_channel.0.clone(),
-            outbound_notification_channel.1.clone(),
-            link_pool.clone(),
-        )
-        .await?;
+        let (membership, foca_event_tx) = start_foca(eid.clone(), link_pool.clone()).await?;
 
         start_listener(
             eid.clone(),
@@ -152,8 +126,6 @@ impl Eldegoss {
             membership,
             inbound_msg_channel,
             outbound_msg_channel,
-            inbound_notification_channel,
-            outbound_notification_channel,
         })
     }
 }
