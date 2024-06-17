@@ -55,44 +55,16 @@ impl FromStr for EldegossId {
     }
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MessageHeader(Timestamp);
-
-impl MessageHeader {
-    #[inline]
-    pub const fn new(timestamp: Timestamp) -> Self {
-        Self(timestamp)
-    }
-
-    #[inline]
-    pub fn id(&self) -> ID {
-        *self.0.get_id()
-    }
-
-    #[inline]
-    pub fn clock(&self) -> u64 {
-        self.0.get_time().as_u64()
-    }
-
-    #[inline]
-    pub const fn timestamp(&self) -> Timestamp {
-        self.0
-    }
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Message {
-    pub header: MessageHeader,
+    pub timestamp: Timestamp,
     pub payload: Bytes,
 }
 
 impl Message {
     #[inline]
     pub fn new(timestamp: Timestamp, payload: Bytes) -> Self {
-        Self {
-            header: MessageHeader::new(timestamp),
-            payload,
-        }
+        Self { timestamp, payload }
     }
 }
 
@@ -104,7 +76,7 @@ pub enum Payload {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Sample {
-    pub header: MessageHeader,
+    pub timestamp: Timestamp,
     pub payload: Payload,
 }
 
@@ -112,7 +84,7 @@ impl Sample {
     #[inline]
     pub fn new_msg(msg: Message) -> Self {
         Self {
-            header: msg.header,
+            timestamp: msg.timestamp,
             payload: Payload::Message(msg.payload),
         }
     }
@@ -120,7 +92,7 @@ impl Sample {
     #[inline]
     pub fn new_foca(timestamp: Timestamp, payload: Bytes) -> Self {
         Self {
-            header: MessageHeader::new(timestamp),
+            timestamp,
             payload: Payload::FocaData(payload),
         }
     }

@@ -398,7 +398,7 @@ pub(crate) async fn dispatch(
     inbound_foca_tx: Sender<FocaEvent>,
     link_pool: Arc<RwLock<HashMap<ID, Arc<Link>>>>,
 ) {
-    let timestamp = sample.header.timestamp();
+    let timestamp = sample.timestamp;
     debug!("dispatch: {timestamp:?}");
     if inbound_msg_cache.contains_key(&timestamp) {
         debug!("duplicate msg: {:?}", timestamp);
