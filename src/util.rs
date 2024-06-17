@@ -1,30 +1,12 @@
 use std::time::Instant;
 
 use clap::Parser;
-use color_eyre::{eyre::eyre, Result};
-use quinn::{RecvStream, SendStream};
-
-use crate::protocol::Sample;
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
     #[arg(short, long, default_value = "config/client.toml")]
     pub config: String,
-}
-
-#[inline]
-pub(crate) fn is_match(re: &str, haystack: &str) -> bool {
-    if re.eq(haystack) {
-        return true;
-    }
-    if let Ok(r) = regex::Regex::new(re) {
-        r.is_match(haystack)
-    } else if let Ok(haystack) = regex::Regex::new(haystack) {
-        haystack.is_match(re)
-    } else {
-        false
-    }
 }
 
 #[derive(Debug)]
@@ -77,25 +59,51 @@ impl Drop for Stats {
     }
 }
 
-#[inline]
-pub(crate) async fn read_msg(recv: &mut RecvStream) -> Result<Sample> {
-    let mut length = [0_u8, 0_u8, 0_u8, 0_u8];
-    recv.read_exact(&mut length).await?;
-    let n = u32::from_le_bytes(length) as usize;
-    if n == 0 {
-        warn!("read 0 bytes");
-        return Err(eyre!("read 0 bytes"));
-    }
-    let bytes = &mut vec![0_u8; n];
-    recv.read_exact(bytes).await?;
-    Sample::decode(bytes)
-}
+#[tokio::test]
+async fn cert() {
+    use common_x::{
+        file::create_file,
+        tls::{new_ca, new_end_entity},
+    };
+    // ca
+    let (ca_cert, ca_key_pair) = new_ca();
+    create_file("./config/cert/ca_cert.pem", ca_cert.pem().as_bytes())
+        .await
+        .unwrap();
+    create_file(
+        "./config/cert/ca_key.pem",
+        ca_key_pair.serialize_pem().as_bytes(),
+    )
+    .await
+    .unwrap();
 
-#[inline]
-pub(crate) async fn write_msg(send: &mut SendStream, msg: Sample) -> Result<()> {
-    let msg_bytes = msg.encode();
-    let len_bytes = (msg_bytes.len() as u32).to_le_bytes().to_vec();
-    let bytes = [len_bytes, msg_bytes].concat();
-    send.write_all(&bytes).await?;
-    Ok(())
+    // server cert
+    let (server_cert, server_key) = new_end_entity("test-host", &ca_cert, &ca_key_pair);
+    create_file(
+        "./config/cert/server_cert.pem",
+        server_cert.pem().as_bytes(),
+    )
+    .await
+    .unwrap();
+    create_file(
+        "./config/cert/server_key.pem",
+        server_key.serialize_pem().as_bytes(),
+    )
+    .await
+    .unwrap();
+
+    // client cert
+    let (client_cert, client_key) = new_end_entity("client.test-host", &ca_cert, &ca_key_pair);
+    create_file(
+        "./config/cert/client_cert.pem",
+        client_cert.pem().as_bytes(),
+    )
+    .await
+    .unwrap();
+    create_file(
+        "./config/cert/client_key.pem",
+        client_key.serialize_pem().as_bytes(),
+    )
+    .await
+    .unwrap();
 }
