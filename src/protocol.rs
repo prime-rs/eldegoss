@@ -12,22 +12,27 @@ use uhlc::{Timestamp, ID};
 pub struct EldegossId(Timestamp);
 
 impl EldegossId {
+    #[inline]
     pub const fn new(timestamp: Timestamp) -> Self {
         Self(timestamp)
     }
 
+    #[inline]
     pub fn id(&self) -> ID {
         *self.0.get_id()
     }
 
+    #[inline]
     pub fn clock(&self) -> u64 {
         self.0.get_time().as_u64()
     }
 
+    #[inline]
     pub const fn timestamp(&self) -> Timestamp {
         self.0
     }
 
+    #[inline]
     pub fn hlc(&self) -> uhlc::HLC {
         uhlc::HLCBuilder::new().with_id(self.id()).build()
     }
@@ -54,18 +59,22 @@ impl FromStr for EldegossId {
 pub struct MessageHeader(Timestamp);
 
 impl MessageHeader {
+    #[inline]
     pub const fn new(timestamp: Timestamp) -> Self {
         Self(timestamp)
     }
 
+    #[inline]
     pub fn id(&self) -> ID {
         *self.0.get_id()
     }
 
+    #[inline]
     pub fn clock(&self) -> u64 {
         self.0.get_time().as_u64()
     }
 
+    #[inline]
     pub const fn timestamp(&self) -> Timestamp {
         self.0
     }
@@ -78,6 +87,7 @@ pub struct Message {
 }
 
 impl Message {
+    #[inline]
     pub fn new(timestamp: Timestamp, payload: Bytes) -> Self {
         Self {
             header: MessageHeader::new(timestamp),
