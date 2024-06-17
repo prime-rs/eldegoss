@@ -8,7 +8,6 @@ pub struct Config {
 
     pub listen: String,
     pub connect: Vec<String>,
-    pub announce: Vec<String>,
 
     pub ca_path: String,
     pub cert_path: String,
@@ -25,7 +24,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             id: uhlc::ID::rand().to_string(),
-            announce: Default::default(),
             ca_path: Default::default(),
             connect: Default::default(),
             listen: Default::default(),

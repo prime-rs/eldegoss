@@ -1,6 +1,6 @@
-id = "1f2828973a5e062ec8dedf33d9b5590d"
-listen = "[::]:9000"
-connect = []
+# id = ""
+listen = "[::]:9003"
+connect = ["127.0.0.1:9002"]
 cert_path = "./config/cert/client_cert.pem"
 private_key_path = "./config/cert/client_key.pem"
 ca_path = "./config/cert/ca_cert.pem"

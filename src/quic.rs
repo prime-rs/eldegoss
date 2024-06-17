@@ -23,7 +23,7 @@ use uhlc::{Timestamp, ID};
 use crate::{
     config::Config,
     membership::FocaEvent,
-    protocol::{EldegossId, Message, Sample},
+    protocol::{EldegossId, Message, Payload, Sample},
 };
 
 pub(crate) struct Link {
@@ -100,7 +100,7 @@ pub(crate) async fn start_outbound_sender(
     loop {
         tokio::select! {
             Ok(msg) = outbound_msg_rvc.recv_async() => {
-                gossip_msg(&msg, mine_eid.id(), link_pool.clone()).await;
+                gossip_msg(Sample::new_msg(msg), mine_eid.id(), mine_eid.id(), link_pool.clone()).await;
             }
             _ = close_handler.handle_async() => {
                 info!("connector: Active shutdown");
@@ -304,26 +304,32 @@ async fn init_handshake(
     });
     let recv = link.recv.clone();
 
-    link_pool.write().await.insert(link.eid.addr(), link);
-
     tokio::spawn(link_task(
-        mine_eid,
-        other_eid,
+        other_eid.clone(),
         locator,
         conn,
         recv,
-        inbound_foca_tx,
+        inbound_foca_tx.clone(),
         inbound_msg_tx,
         connected_locators,
         inbound_msg_cache,
-        link_pool,
+        link_pool.clone(),
     ));
+
+    // insert into link pool
+    link_pool.write().await.insert(link.eid.addr(), link);
+
+    // announce to this link
+    inbound_foca_tx
+        .send_async(FocaEvent::Announce(other_eid.clone()))
+        .await
+        .ok();
+
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn link_task(
-    mine_eid: EldegossId,
     link_eid: EldegossId,
     locator: String,
     conn: Connection,
@@ -339,22 +345,15 @@ async fn link_task(
     loop {
         tokio::select! {
             Ok(sample) = read_sample(&mut recv) => {
-                match sample {
-                    Sample::FocaData(bytes) => {
-                        inbound_foca_tx.send_async(FocaEvent::Data(bytes)).await.ok();
-                    }
-                    Sample::Message(msg) => {
-                        dispatch(
-                            &mine_eid,
-                            inbound_msg_cache.clone(),
-                            msg,
-                            link_eid.id(),
-                            inbound_msg_tx.clone(),
-                            link_pool.clone(),
-                        )
-                        .await;
-                    }
-                }
+                dispatch(
+                    inbound_msg_cache.clone(),
+                    sample,
+                    link_eid.id(),
+                    inbound_msg_tx.clone(),
+                    inbound_foca_tx.clone(),
+                    link_pool.clone(),
+                )
+                .await;
             }
             _ = conn.closed() => {
                 info!(
@@ -392,37 +391,47 @@ async fn read_sample(recv: &mut RecvStream) -> Result<Sample> {
 
 #[inline]
 pub(crate) async fn dispatch(
-    mine_eid: &EldegossId,
     inbound_msg_cache: Cache<Timestamp, ()>,
-    msg: Message,
+    sample: Sample,
     received_from: ID,
     inbound_msg_tx: Sender<Message>,
+    inbound_foca_tx: Sender<FocaEvent>,
     link_pool: Arc<RwLock<HashMap<ID, Arc<Link>>>>,
 ) {
-    let timestamp = msg.header.timestamp();
+    let timestamp = sample.header.timestamp();
     debug!("dispatch: {timestamp:?}");
     if inbound_msg_cache.contains_key(&timestamp) {
         debug!("duplicate msg: {:?}", timestamp);
         return;
     }
 
-    if &mine_eid.addr() != timestamp.get_id() {
-        inbound_msg_cache.insert(timestamp, ());
-    }
+    inbound_msg_cache.insert(timestamp, ());
 
-    gossip_msg(&msg, received_from, link_pool).await;
-    inbound_msg_tx.send_async(msg).await.ok();
+    match &sample.payload {
+        Payload::FocaData(msg) => {
+            inbound_foca_tx
+                .send_async(FocaEvent::Data(msg.clone()))
+                .await
+                .ok();
+        }
+        Payload::Message(msg) => {
+            inbound_msg_tx
+                .send_async(Message::new(timestamp, msg.clone()))
+                .await
+                .ok();
+        }
+    };
+
+    gossip_msg(sample, *timestamp.get_id(), received_from, link_pool).await;
 }
 
 #[inline]
 async fn gossip_msg(
-    msg: &Message,
+    sample: Sample,
+    origin: ID,
     received_from: ID,
     link_pool: Arc<RwLock<HashMap<ID, Arc<Link>>>>,
 ) {
-    let origin = *msg.header.timestamp().get_id();
-
-    let sample = Sample::Message(msg.clone());
     for (eid, link) in link_pool.read().await.iter() {
         // not send to origin and not send to received_from
         if eid != &received_from && eid != &origin {
