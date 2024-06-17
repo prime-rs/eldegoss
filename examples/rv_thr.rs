@@ -1,7 +1,7 @@
 use clap::Parser;
 use color_eyre::Result;
 use eldegoss::{config::Config, eldegoss::Eldegoss, util::Args};
-use tracing::{debug, info};
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -13,8 +13,7 @@ async fn main() -> Result<()> {
     let eldegoss = Eldegoss::serve(config).await?;
 
     let mut stats = eldegoss::util::Stats::new(100000);
-    while let Ok(msg) = eldegoss.recv().await {
-        debug!("{:?}", msg.key_expr());
+    while let Ok(_msg) = eldegoss.recv().await {
         stats.increment();
     }
     Ok(())
