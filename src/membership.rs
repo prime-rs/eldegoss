@@ -292,7 +292,7 @@ pub(crate) async fn start_foca(
                 Ok((eid, data)) = outbound_foca_data_rv.recv_async() => {
                     debug!("outbound_msg send: {eid:?} {data:?}");
                     if let Some(link) = link_pool.read().await.get(&eid.addr()) {
-                        link.send(&Sample::FocaData(data))
+                        link.send(&Sample::new_foca(identity.hlc().new_timestamp(), data))
                             .await
                             .map_err(|e| error!("outbound_msg send error: {e:?}"))
                             .ok();

@@ -27,6 +27,10 @@ impl EldegossId {
     pub const fn timestamp(&self) -> Timestamp {
         self.0
     }
+
+    pub fn hlc(&self) -> uhlc::HLC {
+        uhlc::HLCBuilder::new().with_id(self.id()).build()
+    }
 }
 
 impl Default for EldegossId {
@@ -83,12 +87,34 @@ impl Message {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub enum Sample {
+pub enum Payload {
     FocaData(Bytes),
-    Message(Message),
+    Message(Bytes),
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Sample {
+    pub header: MessageHeader,
+    pub payload: Payload,
 }
 
 impl Sample {
+    #[inline]
+    pub fn new_msg(msg: Message) -> Self {
+        Self {
+            header: msg.header,
+            payload: Payload::Message(msg.payload),
+        }
+    }
+
+    #[inline]
+    pub fn new_foca(timestamp: Timestamp, payload: Bytes) -> Self {
+        Self {
+            header: MessageHeader::new(timestamp),
+            payload: Payload::FocaData(payload),
+        }
+    }
+
     #[inline]
     pub fn encode(&self) -> Result<Bytes> {
         bincode::serialize(self)

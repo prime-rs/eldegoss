@@ -13,7 +13,7 @@ use uhlc::{Timestamp, ID};
 
 use crate::{
     config::Config,
-    membership::{start_foca, FocaEvent, Membership},
+    membership::{start_foca, Membership},
     protocol::{EldegossId, Message},
     quic::{start_connector, start_listener},
 };
@@ -97,6 +97,7 @@ impl Eldegoss {
             .with_id(ID::from_str(&config.id).map_err(|err| eyre!("{err:?}"))?)
             .build();
         let eid = EldegossId::new(hlc.new_timestamp());
+        info!("eldegoss id: {eid:?}");
 
         let link_pool = Arc::new(RwLock::new(HashMap::new()));
         let connected_locators = Arc::new(Mutex::new(HashSet::new()));
@@ -143,15 +144,6 @@ impl Eldegoss {
             inbound_msg_cache,
         )
         .await?;
-
-        // Foca and Network is running, we can tell it to announce to our target
-        for announce in &config.announce {
-            let dst = EldegossId::from_str(announce).map_err(|err| eyre!("{err:?}"))?;
-            foca_event_tx
-                .send_async(FocaEvent::Announce(dst))
-                .await
-                .ok();
-        }
 
         Ok(Self {
             eid,
