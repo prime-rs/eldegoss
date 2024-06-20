@@ -27,7 +27,7 @@ use crate::{
 };
 
 pub(crate) struct Link {
-    eid: EldegossId,
+    locators: Arc<Mutex<HashSet<String>>>,
     recv: Arc<Mutex<RecvStream>>,
     send: Mutex<SendStream>,
 }
@@ -52,7 +52,7 @@ impl Link {
 pub(crate) async fn start_listener(
     mine_eid: EldegossId,
     config: Config,
-    link_pool: Arc<RwLock<HashMap<ID, Arc<Link>>>>,
+    link_pool: Arc<RwLock<HashMap<EldegossId, Arc<Link>>>>,
     inbound_foca_tx: Sender<FocaEvent>,
     inbound_msg_tx: Sender<Message>,
     outbound_msg_rvc: Receiver<Message>,
@@ -64,6 +64,7 @@ pub(crate) async fn start_listener(
         cert_path,
         listen,
         private_key_path,
+        timeout,
         ..
     } = config;
 
@@ -71,6 +72,7 @@ pub(crate) async fn start_listener(
         ServerConfig::with_single_cert(read_certs(cert_path)?, read_key(private_key_path)?)?;
     let mut transport_config = TransportConfig::default();
     transport_config.keep_alive_interval(Some(Duration::from_secs(keep_alive_interval)));
+    transport_config.max_idle_timeout(Some(Duration::from_secs(timeout).try_into()?));
     server_config.transport_config(Arc::new(transport_config));
     let addr = listen.parse::<SocketAddr>()?;
     let endpoint = Endpoint::server(server_config, addr)?;
@@ -94,13 +96,13 @@ pub(crate) async fn start_listener(
 pub(crate) async fn start_outbound_sender(
     outbound_msg_rvc: Receiver<Message>,
     mine_eid: EldegossId,
-    link_pool: Arc<RwLock<HashMap<ID, Arc<Link>>>>,
+    link_pool: Arc<RwLock<HashMap<EldegossId, Arc<Link>>>>,
 ) {
     let close_handler = close_chain().lock().handler(1);
     loop {
         tokio::select! {
             Ok(msg) = outbound_msg_rvc.recv_async() => {
-                gossip_msg(Sample::new_msg(msg), mine_eid.id(), mine_eid.id(), link_pool.clone()).await;
+                gossip_msg(Sample::new_msg(msg), mine_eid.id(), link_pool.clone()).await;
             }
             _ = close_handler.handle_async() => {
                 info!("connector: Active shutdown");
@@ -113,7 +115,7 @@ pub(crate) async fn start_outbound_sender(
 pub(crate) async fn start_connector(
     mine_eid: EldegossId,
     config: Config,
-    link_pool: Arc<RwLock<HashMap<ID, Arc<Link>>>>,
+    link_pool: Arc<RwLock<HashMap<EldegossId, Arc<Link>>>>,
     inbound_foca_tx: Sender<FocaEvent>,
     inbound_msg_tx: Sender<Message>,
     connected_locators: Arc<Mutex<HashSet<String>>>,
@@ -124,6 +126,7 @@ pub(crate) async fn start_connector(
         connect,
         keep_alive_interval,
         check_link_interval,
+        timeout,
         ..
     } = config;
 
@@ -132,6 +135,7 @@ pub(crate) async fn start_connector(
     let mut client_config = ClientConfig::new(Arc::new(quic_config));
     let mut transport_config = TransportConfig::default();
     transport_config.keep_alive_interval(Some(Duration::from_secs(keep_alive_interval)));
+    transport_config.max_idle_timeout(Some(Duration::from_secs(timeout).try_into()?));
     client_config.transport_config(Arc::new(transport_config));
 
     let mut endpoint = Endpoint::client("[::]:0".parse::<std::net::SocketAddr>()?)?;
@@ -149,6 +153,7 @@ pub(crate) async fn start_connector(
             inbound_msg_cache.clone(),
         )
         .await
+        .map_err(|err| error!("connect_to failed: {err:?}"))
         .ok();
     }
 
@@ -180,6 +185,7 @@ pub(crate) async fn start_connector(
                             inbound_msg_cache.clone(),
                         )
                         .await
+                        .map_err(|err| error!("connect_to failed: {err:?}"))
                         .ok();
                     }
                 }
@@ -195,7 +201,7 @@ async fn connect_to(
     endpoint: &Endpoint,
     locator: String,
     mine_eid: &EldegossId,
-    link_pool: &Arc<RwLock<HashMap<ID, Arc<Link>>>>,
+    link_pool: &Arc<RwLock<HashMap<EldegossId, Arc<Link>>>>,
     inbound_foca_tx: &Sender<FocaEvent>,
     inbound_msg_tx: &Sender<Message>,
     connected_locators: Arc<Mutex<HashSet<String>>>,
@@ -208,7 +214,7 @@ async fn connect_to(
         )?
         .await?;
     let (send, recv) = connection.open_bi().await?;
-    if init_handshake(
+    if let Ok(link) = init_handshake(
         mine_eid.clone(),
         locator.to_string(),
         connection,
@@ -221,9 +227,8 @@ async fn connect_to(
         inbound_msg_cache,
     )
     .await
-    .map_err(|err| error!("{err:?}"))
-    .is_ok()
     {
+        link.locators.lock().await.insert(locator.clone());
         connected_locators.lock().await.insert(locator);
     }
     Ok(())
@@ -232,7 +237,7 @@ async fn connect_to(
 async fn accept_task(
     mine_eid: EldegossId,
     endpoint: Endpoint,
-    link_pool: Arc<RwLock<HashMap<ID, Arc<Link>>>>,
+    link_pool: Arc<RwLock<HashMap<EldegossId, Arc<Link>>>>,
     inbound_foca_tx: Sender<FocaEvent>,
     inbound_msg_tx: Sender<Message>,
     connected_locators: Arc<Mutex<HashSet<String>>>,
@@ -283,32 +288,44 @@ async fn init_handshake(
     conn: Connection,
     mut send: SendStream,
     mut recv: RecvStream,
-    link_pool: Arc<RwLock<HashMap<ID, Arc<Link>>>>,
+    link_pool: Arc<RwLock<HashMap<EldegossId, Arc<Link>>>>,
     inbound_foca_tx: Sender<FocaEvent>,
     inbound_msg_tx: Sender<Message>,
     connected_locators: Arc<Mutex<HashSet<String>>>,
     inbound_msg_cache: Cache<Timestamp, ()>,
-) -> Result<()> {
+) -> Result<Arc<Link>> {
+    info!("handshake with {locator}");
     let bytes = bincode::serialize(&mine_eid)?;
     send.write_all(&bytes).await?;
     let mut bytes = [0; 24];
 
-    tokio::time::timeout(Duration::from_secs(2), recv.read_exact(&mut bytes)).await??;
+    tokio::time::timeout(Duration::from_secs(1), recv.read_exact(&mut bytes)).await??;
     let other_eid: EldegossId = bincode::deserialize(&bytes)?;
-    info!("handshake with {other_eid:?}");
+    info!("handshake done {other_eid:?}");
+
+    if let Some(link) = link_pool.read().await.get(&other_eid) {
+        info!("link({other_eid:?}) already exists");
+        return Ok(link.clone());
+    }
+
+    let locators = Arc::new(Mutex::new(HashSet::from_iter([locator.clone()])));
 
     let link = Arc::new(Link {
-        eid: other_eid.clone(),
         recv: Arc::new(Mutex::new(recv)),
         send: Mutex::new(send),
+        locators: locators.clone(),
     });
-    let recv = link.recv.clone();
+
+    link_pool
+        .write()
+        .await
+        .insert(other_eid.clone(), link.clone());
 
     tokio::spawn(link_task(
         other_eid.clone(),
-        locator,
+        locators,
         conn,
-        recv,
+        link.recv.clone(),
         inbound_foca_tx.clone(),
         inbound_msg_tx,
         connected_locators,
@@ -316,32 +333,34 @@ async fn init_handshake(
         link_pool.clone(),
     ));
 
-    // insert into link pool
-    link_pool.write().await.insert(link.eid.addr(), link);
+    info!("new link: {other_eid:?}");
 
-    // announce to this link
-    inbound_foca_tx
-        .send_async(FocaEvent::Announce(other_eid.clone()))
-        .await
-        .ok();
-
-    Ok(())
+    Ok(link)
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn link_task(
     link_eid: EldegossId,
-    locator: String,
+    locators: Arc<Mutex<HashSet<String>>>,
     conn: Connection,
     recv: Arc<Mutex<RecvStream>>,
     inbound_foca_tx: Sender<FocaEvent>,
     inbound_msg_tx: Sender<Message>,
     connected_locators: Arc<Mutex<HashSet<String>>>,
     inbound_msg_cache: Cache<Timestamp, ()>,
-    link_pool: Arc<RwLock<HashMap<ID, Arc<Link>>>>,
+    link_pool: Arc<RwLock<HashMap<EldegossId, Arc<Link>>>>,
 ) -> Result<()> {
+    info!("link started: {link_eid:?}");
+
+    // announce to this link
+    inbound_foca_tx
+        .send_async(FocaEvent::Announce(link_eid.clone()))
+        .await
+        .ok();
+
     let close_handler = close_chain().lock().handler(2);
     let mut recv = recv.lock().await;
+
     loop {
         tokio::select! {
             Ok(sample) = read_sample(&mut recv) => {
@@ -356,7 +375,7 @@ async fn link_task(
                 .await;
             }
             _ = conn.closed() => {
-                info!(
+                warn!(
                     "Link({link_eid:?}) connection closed, reason: {:?}",
                     conn.close_reason()
                 );
@@ -369,7 +388,12 @@ async fn link_task(
         }
     }
 
-    connected_locators.lock().await.remove(&locator);
+    for locator in locators.lock().await.iter() {
+        connected_locators.lock().await.remove(locator);
+    }
+    link_pool.write().await.remove(&link_eid);
+
+    info!("link closed: {link_eid:?}");
 
     Ok(())
 }
@@ -396,7 +420,7 @@ pub(crate) async fn dispatch(
     received_from: ID,
     inbound_msg_tx: Sender<Message>,
     inbound_foca_tx: Sender<FocaEvent>,
-    link_pool: Arc<RwLock<HashMap<ID, Arc<Link>>>>,
+    link_pool: Arc<RwLock<HashMap<EldegossId, Arc<Link>>>>,
 ) {
     let timestamp = sample.timestamp;
     debug!("dispatch: {timestamp:?}");
@@ -404,7 +428,6 @@ pub(crate) async fn dispatch(
         debug!("duplicate msg: {:?}", timestamp);
         return;
     }
-
     inbound_msg_cache.insert(timestamp, ());
 
     match &sample.payload {
@@ -422,20 +445,19 @@ pub(crate) async fn dispatch(
         }
     };
 
-    gossip_msg(sample, *timestamp.get_id(), received_from, link_pool).await;
+    gossip_msg(sample, received_from, link_pool).await;
 }
 
 #[inline]
-async fn gossip_msg(
+pub(crate) async fn gossip_msg(
     sample: Sample,
-    origin: ID,
     received_from: ID,
-    link_pool: Arc<RwLock<HashMap<ID, Arc<Link>>>>,
+    link_pool: Arc<RwLock<HashMap<EldegossId, Arc<Link>>>>,
 ) {
+    let origin = *sample.timestamp.get_id();
     for (eid, link) in link_pool.read().await.iter() {
         // not send to origin and not send to received_from
-        if eid != &received_from && eid != &origin {
-            let link = link.clone();
+        if eid.addr() != received_from && eid.addr() != origin {
             link.send(&sample).await.ok();
         }
     }
