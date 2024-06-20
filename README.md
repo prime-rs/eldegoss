@@ -5,7 +5,7 @@
 
 ## Introduction
 
-Eldegoss is a peer-to-peer networking library based on the quic and gossip protocols.
+Eldegoss is a peer-to-peer networking library based on the QUIC and SWIM protocols.
 
 ## Usage
 
