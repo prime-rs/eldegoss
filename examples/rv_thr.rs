@@ -1,5 +1,6 @@
 use clap::Parser;
 use color_eyre::Result;
+use common_x::signal::waiting_for_shutdown;
 use eldegoss::{config::Config, eldegoss::Eldegoss, util::Args};
 use tracing::info;
 
@@ -13,8 +14,15 @@ async fn main() -> Result<()> {
     let eldegoss = Eldegoss::serve(config).await?;
 
     let mut stats = eldegoss::util::Stats::new(100000);
-    while let Ok(_msg) = eldegoss.recv().await {
-        stats.increment();
+    loop {
+        tokio::select! {
+            Ok(_msg) = eldegoss.recv() => {
+                stats.increment();
+            }
+            _ = waiting_for_shutdown() => {
+                break;
+            }
+        }
     }
     Ok(())
 }

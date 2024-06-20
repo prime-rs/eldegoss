@@ -88,28 +88,14 @@ pub(crate) async fn start_listener(
         inbound_msg_cache,
     ));
 
-    tokio::spawn(start_outbound_sender(outbound_msg_rvc, mine_eid, link_pool));
+    // handle outbound messages
+    tokio::spawn(async move {
+        while let Ok(msg) = outbound_msg_rvc.recv_async().await {
+            gossip_msg(Sample::new_msg(msg), mine_eid.id(), link_pool.clone()).await;
+        }
+    });
 
     Ok(())
-}
-
-pub(crate) async fn start_outbound_sender(
-    outbound_msg_rvc: Receiver<Message>,
-    mine_eid: EldegossId,
-    link_pool: Arc<RwLock<HashMap<EldegossId, Arc<Link>>>>,
-) {
-    let close_handler = close_chain().lock().handler(1);
-    loop {
-        tokio::select! {
-            Ok(msg) = outbound_msg_rvc.recv_async() => {
-                gossip_msg(Sample::new_msg(msg), mine_eid.id(), link_pool.clone()).await;
-            }
-            _ = close_handler.handle_async() => {
-                info!("connector: Active shutdown");
-                break;
-            }
-        }
-    }
 }
 
 pub(crate) async fn start_connector(
@@ -159,36 +145,28 @@ pub(crate) async fn start_connector(
 
     // reconnect
     tokio::spawn(async move {
-        let close_handler = close_chain().lock().handler(1);
         let mut interval = tokio::time::interval(Duration::from_secs(check_link_interval));
         interval.tick().await;
         loop {
-            tokio::select! {
-                _ = close_handler.handle_async() => {
-                    info!("connector: Active shutdown");
-                    break;
+            interval.tick().await;
+            for locator in &connect {
+                if connected_locators.lock().await.contains(locator) {
+                    continue;
                 }
-                _ = interval.tick() => {
-                    for locator in &connect {
-                        if connected_locators.lock().await.contains(locator) {
-                            continue;
-                        }
-                        info!("reconnect to: {locator}");
-                        connect_to(
-                            &endpoint,
-                            locator.to_owned(),
-                            &mine_eid,
-                            &link_pool,
-                            &inbound_foca_tx,
-                            &inbound_msg_tx,
-                            connected_locators.clone(),
-                            inbound_msg_cache.clone(),
-                        )
-                        .await
-                        .map_err(|err| error!("connect_to failed: {err:?}"))
-                        .ok();
-                    }
-                }
+                info!("reconnect to: {locator}");
+                connect_to(
+                    &endpoint,
+                    locator.to_owned(),
+                    &mine_eid,
+                    &link_pool,
+                    &inbound_foca_tx,
+                    &inbound_msg_tx,
+                    connected_locators.clone(),
+                    inbound_msg_cache.clone(),
+                )
+                .await
+                .map_err(|err| error!("connect_to failed: {err:?}"))
+                .ok();
             }
         }
     });
@@ -243,8 +221,6 @@ async fn accept_task(
     connected_locators: Arc<Mutex<HashSet<String>>>,
     inbound_msg_cache: Cache<Timestamp, ()>,
 ) -> Result<()> {
-    let close_handler = close_chain().lock().handler(1);
-
     let (new_link_sender, new_link_receiver) = flume::bounded(16);
 
     loop {
@@ -272,10 +248,6 @@ async fn accept_task(
                 .await
                 .map_err(|err| error!("{err:?}"))
                 .ok();
-            }
-            _ = close_handler.handle_async() => {
-                info!("serve: Active shutdown");
-                return Ok(());
             }
         }
     }
@@ -358,9 +330,10 @@ async fn link_task(
         .await
         .ok();
 
-    let close_handler = close_chain().lock().handler(2);
+    let close_handler = close_chain().lock().handler(1);
     let mut recv = recv.lock().await;
 
+    let close_reason;
     loop {
         tokio::select! {
             Ok(sample) = read_sample(&mut recv) => {
@@ -379,14 +352,18 @@ async fn link_task(
                     "Link({link_eid:?}) connection closed, reason: {:?}",
                     conn.close_reason()
                 );
+                close_reason = format!("closed by remote, reason: {:?}", conn.close_reason());
                 break;
             }
             _ = close_handler.handle_async() => {
-                info!("serve: Active shutdown");
+                info!("Link({link_eid:?}): active shutdown");
+                close_reason = "active shutdown".to_string();
                 break;
             }
         }
     }
+
+    conn.close(0_u32.into(), close_reason.as_bytes());
 
     for locator in locators.lock().await.iter() {
         connected_locators.lock().await.remove(locator);

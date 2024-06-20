@@ -7,7 +7,6 @@ use bincode::DefaultOptions;
 use bytes::Bytes;
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
-use common_x::graceful_shutdown::close_chain;
 use flume::Sender;
 use foca::{BincodeCodec, Config as FocaConfig, Foca, Identity, Notification, Timer};
 use foca::{NoCustomBroadcast, PeriodicParams};
@@ -156,23 +155,14 @@ pub(crate) async fn start_foca(
     });
 
     tokio::spawn(async move {
-        let close_handler = close_chain().lock().handler(1);
-        loop {
-            tokio::select! {
-                Ok((_eid, data)) = outbound_foca_data_rv.recv_async() => {
-                    // info!("outbound foca msg: {eid:?}");
-                    gossip_msg(
-                        Sample::new_foca(identity.hlc().new_timestamp(), data.clone()),
-                        identity.id(),
-                        link_pool.clone(),
-                    )
-                    .await;
-                }
-                _ = close_handler.handle_async() => {
-                    info!("serve: Active shutdown");
-                    break;
-                }
-            }
+        while let Ok((_eid, data)) = outbound_foca_data_rv.recv_async().await {
+            // info!("outbound foca msg: {eid:?}");
+            gossip_msg(
+                Sample::new_foca(identity.hlc().new_timestamp(), data.clone()),
+                identity.id(),
+                link_pool.clone(),
+            )
+            .await;
         }
     });
 

@@ -1,5 +1,6 @@
 use clap::Parser;
 use color_eyre::Result;
+use common_x::signal::waiting_for_shutdown;
 use eldegoss::{config::Config, eldegoss::Eldegoss, util::Args};
 use tracing::info;
 
@@ -12,7 +13,12 @@ async fn main() -> Result<()> {
 
     let eldegoss = Eldegoss::serve(config).await?;
 
-    loop {
-        eldegoss.send(vec![0; 1024]).await.ok();
-    }
+    tokio::spawn(async move {
+        loop {
+            eldegoss.send(vec![0; 1024]).await.ok();
+        }
+    });
+
+    waiting_for_shutdown().await;
+    Ok(())
 }
