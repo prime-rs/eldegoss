@@ -6,6 +6,7 @@ use std::{
 };
 
 use color_eyre::{eyre::eyre, Result};
+use common_x::graceful_shutdown::{close_chain, CloseHandler};
 use flume::{Receiver, Sender};
 use mini_moka::sync::Cache;
 use tokio::sync::{Mutex, RwLock};
@@ -27,6 +28,7 @@ pub struct Eldegoss {
     membership: Membership,
     inbound_msg_channel: MessageChannel,
     outbound_msg_channel: MessageChannel,
+    close_handler: CloseHandler,
 }
 
 impl Eldegoss {
@@ -126,6 +128,15 @@ impl Eldegoss {
             membership,
             inbound_msg_channel,
             outbound_msg_channel,
+            close_handler: close_chain().lock().handler(0),
         })
+    }
+}
+
+impl Drop for Eldegoss {
+    fn drop(&mut self) {
+        close_chain().lock().close();
+        self.close_handler.handle();
+        info!("Session: Active shutdown");
     }
 }
