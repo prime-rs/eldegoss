@@ -55,7 +55,7 @@ impl FromStr for EldegossId {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Message {
     pub timestamp: Timestamp,
     pub payload: Bytes,

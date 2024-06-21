@@ -91,7 +91,7 @@ pub(crate) async fn start_listener(
     // handle outbound messages
     tokio::spawn(async move {
         while let Ok(msg) = outbound_msg_rvc.recv_async().await {
-            gossip_msg(Sample::new_msg(msg), mine_eid.id(), link_pool.clone()).await;
+            gossip_msg(&Sample::new_msg(msg), mine_eid.id(), link_pool.clone()).await;
         }
     });
 
@@ -277,6 +277,8 @@ async fn init_handshake(
 
     if let Some(link) = link_pool.read().await.get(&other_eid) {
         info!("link({other_eid:?}) already exists");
+        // sleep 1s for remote peer to finish handshake
+        tokio::time::sleep(Duration::from_secs(1)).await;
         return Ok(link.clone());
     }
 
@@ -407,35 +409,32 @@ pub(crate) async fn dispatch(
     }
     inbound_msg_cache.insert(timestamp, ());
 
-    match &sample.payload {
+    gossip_msg(&sample, received_from, link_pool).await;
+
+    match sample.payload {
         Payload::FocaData(msg) => {
-            inbound_foca_tx
-                .send_async(FocaEvent::Data(msg.clone()))
-                .await
-                .ok();
+            inbound_foca_tx.send_async(FocaEvent::Data(msg)).await.ok();
         }
         Payload::Message(msg) => {
             inbound_msg_tx
-                .send_async(Message::new(timestamp, msg.clone()))
+                .send_async(Message::new(timestamp, msg))
                 .await
                 .ok();
         }
     };
-
-    gossip_msg(sample, received_from, link_pool).await;
 }
 
 #[inline]
 pub(crate) async fn gossip_msg(
-    sample: Sample,
+    sample: &Sample,
     received_from: ID,
     link_pool: Arc<RwLock<HashMap<EldegossId, Arc<Link>>>>,
 ) {
-    let origin = *sample.timestamp.get_id();
+    let origin = sample.timestamp.get_id();
     for (eid, link) in link_pool.read().await.iter() {
         // not send to origin and not send to received_from
-        if eid.addr() != received_from && eid.addr() != origin {
-            link.send(&sample).await.ok();
+        if eid.addr() != received_from && &eid.addr() != origin {
+            link.send(sample).await.ok();
         }
     }
 }
