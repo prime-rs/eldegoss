@@ -158,7 +158,7 @@ pub(crate) async fn start_foca(
         while let Ok((_eid, data)) = outbound_foca_data_rv.recv_async().await {
             // info!("outbound foca msg: {eid:?}");
             gossip_msg(
-                Sample::new_foca(identity.hlc().new_timestamp(), data.clone()),
+                &Sample::new_foca(identity.hlc().new_timestamp(), data.clone()),
                 identity.id(),
                 link_pool.clone(),
             )
