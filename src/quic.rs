@@ -221,7 +221,7 @@ async fn accept_task(
     connected_locators: Arc<Mutex<HashSet<String>>>,
     inbound_msg_cache: Cache<Timestamp, ()>,
 ) -> Result<()> {
-    let (new_link_sender, new_link_receiver) = flume::bounded(16);
+    let (new_link_sender, new_link_receiver) = flume::bounded(256);
 
     loop {
         tokio::select! {
