@@ -51,8 +51,8 @@ pub(crate) async fn start_foca(
     identity: EldegossId,
     link_pool: Arc<RwLock<HashMap<EldegossId, Arc<Link>>>>,
 ) -> Result<(Membership, Sender<FocaEvent>)> {
-    let (foca_event_tx, foca_event_rv) = flume::bounded(1024);
-    let (outbound_foca_data_tx, outbound_foca_data_rv) = flume::bounded(1024);
+    let (foca_event_tx, foca_event_rv) = flume::bounded(256);
+    let (outbound_foca_data_tx, outbound_foca_data_rv) = flume::bounded(256);
 
     let foca_config = {
         let period = Duration::from_secs(15);

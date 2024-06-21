@@ -86,8 +86,8 @@ impl Eldegoss {
         let link_pool = Arc::new(RwLock::new(HashMap::new()));
         let connected_locators = Arc::new(Mutex::new(HashSet::new()));
 
-        let inbound_msg_channel = flume::bounded(1024);
-        let outbound_msg_channel = flume::bounded(1024);
+        let inbound_msg_channel = flume::bounded(256);
+        let outbound_msg_channel = flume::bounded(256);
 
         // cache
         let inbound_msg_cache: Cache<Timestamp, ()> = Cache::builder()
