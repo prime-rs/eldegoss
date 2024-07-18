@@ -20,7 +20,7 @@ async fn main() -> Result<()> {
                 info!("Received {msg:?}");
             }
             _ = interval.tick() => {
-                eldegoss.send(vec![]).await.ok();
+                eldegoss.send("test", vec![]).await.ok();
             }
             _ = waiting_for_shutdown() => {
                 break;

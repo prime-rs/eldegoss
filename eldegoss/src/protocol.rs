@@ -53,20 +53,25 @@ impl FromStr for EldegossId {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Message {
     pub timestamp: Timestamp,
+    pub key_expr: String,
     pub payload: Bytes,
 }
 
 impl Message {
     #[inline]
-    pub fn new(timestamp: Timestamp, payload: Bytes) -> Self {
-        Self { timestamp, payload }
+    pub fn new(timestamp: Timestamp, key_expr: String, payload: Bytes) -> Self {
+        Self {
+            timestamp,
+            key_expr,
+            payload,
+        }
     }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 pub enum Payload {
     FocaData(Bytes),
-    Message(Bytes),
+    Message(String, Bytes),
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -80,7 +85,7 @@ impl Sample {
     pub fn new_msg(msg: Message) -> Self {
         Self {
             timestamp: msg.timestamp,
-            payload: Payload::Message(msg.payload),
+            payload: Payload::Message(msg.key_expr, msg.payload),
         }
     }
 

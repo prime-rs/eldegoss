@@ -415,9 +415,9 @@ pub(crate) async fn dispatch(
         Payload::FocaData(msg) => {
             inbound_foca_tx.send_async(FocaEvent::Data(msg)).await.ok();
         }
-        Payload::Message(msg) => {
+        Payload::Message(key_expr, msg) => {
             inbound_msg_tx
-                .send_async(Message::new(timestamp, msg))
+                .send_async(Message::new(timestamp, key_expr, msg))
                 .await
                 .ok();
         }
