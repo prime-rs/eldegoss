@@ -65,10 +65,14 @@ impl Eldegoss {
             .map_err(|err| eyre!("{err:?}"))
     }
 
-    pub async fn send(&self, payload: Vec<u8>) -> Result<()> {
+    pub async fn send(&self, key_expr: &str, payload: Vec<u8>) -> Result<()> {
         self.outbound_msg_channel
             .0
-            .send_async(Message::new(self.hlc.new_timestamp(), payload.into()))
+            .send_async(Message::new(
+                self.hlc.new_timestamp(),
+                key_expr.to_owned(),
+                payload.into(),
+            ))
             .await
             .map_err(|err| eyre!("{err:?}"))
     }

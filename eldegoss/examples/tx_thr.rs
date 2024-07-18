@@ -15,7 +15,7 @@ async fn main() -> Result<()> {
 
     tokio::spawn(async move {
         loop {
-            eldegoss.send(vec![0; 1024]).await.ok();
+            eldegoss.send("test", vec![0; 1024]).await.ok();
         }
     });
 
