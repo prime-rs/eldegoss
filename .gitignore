@@ -7,5 +7,6 @@ Cargo.lock
 *.pem
 .vscode
 .idea
+*.wasm
 
 /proto

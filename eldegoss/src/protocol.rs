@@ -28,11 +28,6 @@ impl EldegossId {
     }
 
     #[inline]
-    pub const fn timestamp(&self) -> Timestamp {
-        self.0
-    }
-
-    #[inline]
     pub fn hlc(&self) -> uhlc::HLC {
         uhlc::HLCBuilder::new().with_id(self.id()).build()
     }
