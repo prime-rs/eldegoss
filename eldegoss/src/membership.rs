@@ -8,7 +8,7 @@ use bytes::Bytes;
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
 use flume::Sender;
-use foca::{BincodeCodec, Config as FocaConfig, Foca, Identity, Notification, Timer};
+use foca::{BincodeCodec, Config as FocaConfig, Foca, Identity, OwnedNotification, Timer};
 use foca::{NoCustomBroadcast, PeriodicParams};
 use rand::{rngs::StdRng, SeedableRng};
 use tokio::sync::RwLock;
@@ -131,17 +131,17 @@ pub(crate) async fn start_foca(
 
             while let Some(notification) = runtime.to_notify() {
                 match notification {
-                    Notification::MemberUp(eid) => info!("member up: {eid:?}"),
-                    Notification::MemberDown(eid) => info!("member down: {eid:?}"),
-                    Notification::Idle => info!("cluster empty"),
-                    Notification::Rename(old, new) => {
+                    OwnedNotification::MemberUp(eid) => info!("member up: {eid:?}"),
+                    OwnedNotification::MemberDown(eid) => info!("member down: {eid:?}"),
+                    OwnedNotification::Idle => info!("cluster empty"),
+                    OwnedNotification::Rename(old, new) => {
                         info!("member {old:?} is now known as {new:?}")
                     }
-                    Notification::Active => info!("current identity is active"),
-                    Notification::Defunct => {
+                    OwnedNotification::Active => info!("current identity is active"),
+                    OwnedNotification::Defunct => {
                         info!("current identity is defunct, need change identity")
                     }
-                    Notification::Rejoin(eid) => info!("member rejoin: {eid:?}"),
+                    OwnedNotification::Rejoin(eid) => info!("member rejoin: {eid:?}"),
                 }
                 let members = foca
                     .read()

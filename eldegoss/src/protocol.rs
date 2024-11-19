@@ -58,7 +58,7 @@ pub struct Message {
 
 impl Message {
     #[inline]
-    pub fn new(timestamp: Timestamp, payload: Bytes) -> Self {
+    pub const fn new(timestamp: Timestamp, payload: Bytes) -> Self {
         Self { timestamp, payload }
     }
 }
@@ -85,7 +85,7 @@ impl Sample {
     }
 
     #[inline]
-    pub fn new_foca(timestamp: Timestamp, payload: Bytes) -> Self {
+    pub const fn new_foca(timestamp: Timestamp, payload: Bytes) -> Self {
         Self {
             timestamp,
             payload: Payload::FocaData(payload),
