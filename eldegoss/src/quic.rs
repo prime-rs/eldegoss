@@ -24,6 +24,7 @@ use crate::{
     config::Config,
     membership::FocaEvent,
     protocol::{EldegossId, Message, Payload, Sample},
+    util::get_quic_addr,
 };
 
 pub(crate) struct Link {
@@ -57,7 +58,7 @@ pub(crate) async fn start_listener(
     inbound_msg_tx: Sender<Message>,
     outbound_msg_rvc: Receiver<Message>,
     connected_locators: Arc<Mutex<HashSet<String>>>,
-    inbound_msg_cache: Cache<Timestamp, ()>,
+    inbound_timestamp_cache: Cache<Timestamp, ()>,
 ) -> Result<()> {
     let Config {
         keep_alive_interval,
@@ -85,7 +86,7 @@ pub(crate) async fn start_listener(
         inbound_foca_tx,
         inbound_msg_tx,
         connected_locators,
-        inbound_msg_cache,
+        inbound_timestamp_cache,
     ));
 
     // handle outbound messages
@@ -105,7 +106,7 @@ pub(crate) async fn start_connector(
     inbound_foca_tx: Sender<FocaEvent>,
     inbound_msg_tx: Sender<Message>,
     connected_locators: Arc<Mutex<HashSet<String>>>,
-    inbound_msg_cache: Cache<Timestamp, ()>,
+    inbound_timestamp_cache: Cache<Timestamp, ()>,
 ) -> Result<()> {
     let Config {
         ca_path,
@@ -136,10 +137,10 @@ pub(crate) async fn start_connector(
             &inbound_foca_tx,
             &inbound_msg_tx,
             connected_locators.clone(),
-            inbound_msg_cache.clone(),
+            inbound_timestamp_cache.clone(),
         )
         .await
-        .map_err(|err| error!("connect_to failed: {err:?}"))
+        .map_err(|err| warn!("connect failed and will be retried: {err:?}"))
         .ok();
     }
 
@@ -162,10 +163,10 @@ pub(crate) async fn start_connector(
                     &inbound_foca_tx,
                     &inbound_msg_tx,
                     connected_locators.clone(),
-                    inbound_msg_cache.clone(),
+                    inbound_timestamp_cache.clone(),
                 )
                 .await
-                .map_err(|err| error!("connect_to failed: {err:?}"))
+                .map_err(|err| warn!("connect failed and will be retried: {:?}", err))
                 .ok();
             }
         }
@@ -183,11 +184,13 @@ async fn connect_to(
     inbound_foca_tx: &Sender<FocaEvent>,
     inbound_msg_tx: &Sender<Message>,
     connected_locators: Arc<Mutex<HashSet<String>>>,
-    inbound_msg_cache: Cache<Timestamp, ()>,
-) -> Result<(), color_eyre::eyre::Error> {
+    inbound_timestamp_cache: Cache<Timestamp, ()>,
+) -> Result<()> {
     let connection = endpoint
         .connect(
-            locator.parse::<std::net::SocketAddr>().unwrap(),
+            locator
+                .parse::<std::net::SocketAddr>()
+                .unwrap_or(get_quic_addr(&locator).await?),
             "localhost",
         )?
         .await?;
@@ -202,7 +205,7 @@ async fn connect_to(
         inbound_foca_tx.clone(),
         inbound_msg_tx.clone(),
         connected_locators.clone(),
-        inbound_msg_cache,
+        inbound_timestamp_cache,
     )
     .await
     {
@@ -219,7 +222,7 @@ async fn accept_task(
     inbound_foca_tx: Sender<FocaEvent>,
     inbound_msg_tx: Sender<Message>,
     connected_locators: Arc<Mutex<HashSet<String>>>,
-    inbound_msg_cache: Cache<Timestamp, ()>,
+    inbound_timestamp_cache: Cache<Timestamp, ()>,
 ) -> Result<()> {
     let (new_link_sender, new_link_receiver) = flume::bounded(256);
 
@@ -243,7 +246,7 @@ async fn accept_task(
                     inbound_foca_tx.clone(),
                     inbound_msg_tx.clone(),
                     connected_locators.clone(),
-                    inbound_msg_cache.clone(),
+                    inbound_timestamp_cache.clone(),
                 )
                 .await
                 .map_err(|err| error!("{err:?}"))
@@ -264,7 +267,7 @@ async fn init_handshake(
     inbound_foca_tx: Sender<FocaEvent>,
     inbound_msg_tx: Sender<Message>,
     connected_locators: Arc<Mutex<HashSet<String>>>,
-    inbound_msg_cache: Cache<Timestamp, ()>,
+    inbound_timestamp_cache: Cache<Timestamp, ()>,
 ) -> Result<Arc<Link>> {
     info!("handshake with {locator}");
     let bytes = bincode::serialize(&mine_eid)?;
@@ -303,7 +306,7 @@ async fn init_handshake(
         inbound_foca_tx.clone(),
         inbound_msg_tx,
         connected_locators,
-        inbound_msg_cache,
+        inbound_timestamp_cache,
         link_pool.clone(),
     ));
 
@@ -321,7 +324,7 @@ async fn link_task(
     inbound_foca_tx: Sender<FocaEvent>,
     inbound_msg_tx: Sender<Message>,
     connected_locators: Arc<Mutex<HashSet<String>>>,
-    inbound_msg_cache: Cache<Timestamp, ()>,
+    inbound_timestamp_cache: Cache<Timestamp, ()>,
     link_pool: Arc<RwLock<HashMap<EldegossId, Arc<Link>>>>,
 ) -> Result<()> {
     info!("link started: {link_eid:?}");
@@ -340,7 +343,7 @@ async fn link_task(
         tokio::select! {
             Ok(sample) = read_sample(&mut recv) => {
                 dispatch(
-                    inbound_msg_cache.clone(),
+                    inbound_timestamp_cache.clone(),
                     sample,
                     link_eid.id(),
                     inbound_msg_tx.clone(),
@@ -394,7 +397,7 @@ async fn read_sample(recv: &mut RecvStream) -> Result<Sample> {
 
 #[inline]
 pub(crate) async fn dispatch(
-    inbound_msg_cache: Cache<Timestamp, ()>,
+    inbound_timestamp_cache: Cache<Timestamp, ()>,
     sample: Sample,
     received_from: ID,
     inbound_msg_tx: Sender<Message>,
@@ -403,11 +406,11 @@ pub(crate) async fn dispatch(
 ) {
     let timestamp = sample.timestamp;
     debug!("dispatch: {timestamp:?}");
-    if inbound_msg_cache.contains_key(&timestamp) {
+    if inbound_timestamp_cache.contains_key(&timestamp) {
         debug!("duplicate msg: {:?}", timestamp);
         return;
     }
-    inbound_msg_cache.insert(timestamp, ());
+    inbound_timestamp_cache.insert(timestamp, ());
 
     gossip_msg(&sample, received_from, link_pool).await;
 

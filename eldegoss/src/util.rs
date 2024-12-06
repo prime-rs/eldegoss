@@ -1,6 +1,7 @@
-use std::time::Instant;
+use std::{net::SocketAddr, time::Instant};
 
 use clap::Parser;
+use color_eyre::eyre::{bail, Result};
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -56,6 +57,16 @@ impl Drop for Stats {
             let throughtput = total as f64 / elapsed;
             info!("Received {total} messages over {elapsed:.2}s: {throughtput}msg/s");
         }
+    }
+}
+
+pub async fn get_quic_addr(address: &str) -> Result<SocketAddr> {
+    match tokio::net::lookup_host(address).await?.next() {
+        Some(addr) => {
+            info!("Resolved {address} to {addr}");
+            Ok(addr)
+        }
+        None => bail!("Couldn't resolve QUIC locator address: {}", address),
     }
 }
 

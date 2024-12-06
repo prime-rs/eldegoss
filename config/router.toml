@@ -1,0 +1,9 @@
+[eldegoss_config]
+listen = "[::]:9210"
+cert_path = "/root/eldegoss_router/cert/server_cert.pem"
+private_key_path = "/root/eldegoss_router/cert/server_key.pem"
+ca_path = "/root/eldegoss_router/cert/ca_cert.pem"
+
+[log_config]
+filter = "info"
+rolling_file = ["/root/eldegoss_router/logs", "eldegoss_router"]

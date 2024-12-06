@@ -17,10 +17,10 @@ async fn main() -> Result<()> {
     loop {
         tokio::select! {
             Ok(msg) = eldegoss.recv() => {
-                info!("Received {msg:?}");
+                info!("Received {:?}", msg.payload.len());
             }
             _ = interval.tick() => {
-                eldegoss.send("test", vec![]).await.ok();
+                eldegoss.send("test", vec![0; 1024]).await.ok();
             }
             _ = waiting_for_shutdown() => {
                 break;
