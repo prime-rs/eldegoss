@@ -94,13 +94,16 @@ impl Eldegoss {
         let outbound_msg_channel = flume::bounded(256);
 
         // cache
-        let inbound_msg_cache: Cache<Timestamp, ()> = Cache::builder()
+        let inbound_timestamp_cache: Cache<Timestamp, ()> = Cache::builder()
             .weigher(|_, _| 128u32 + 64u32)
-            .max_capacity(1024 * 8)
+            .max_capacity(1024)
             .time_to_live(Duration::from_secs(1))
             .build();
+        debug!("init cache success");
 
         let (membership, foca_event_tx) = start_foca(eid.clone(), link_pool.clone()).await?;
+
+        debug!("foca started");
 
         start_listener(
             eid.clone(),
@@ -110,9 +113,11 @@ impl Eldegoss {
             inbound_msg_channel.0.clone(),
             outbound_msg_channel.1.clone(),
             connected_locators.clone(),
-            inbound_msg_cache.clone(),
+            inbound_timestamp_cache.clone(),
         )
         .await?;
+
+        debug!("quic listener started");
 
         start_connector(
             eid.clone(),
@@ -121,9 +126,11 @@ impl Eldegoss {
             foca_event_tx.clone(),
             inbound_msg_channel.0.clone(),
             connected_locators,
-            inbound_msg_cache,
+            inbound_timestamp_cache,
         )
         .await?;
+
+        debug!("quic connector started");
 
         Ok(Self {
             eid,

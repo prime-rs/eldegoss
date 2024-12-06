@@ -1,6 +1,6 @@
 # id = "b9f206a233b33c7669bfb5a9c4d7c194"
 listen = "[::]:9001"
-connect = ["127.0.0.1:9000"]
+connect = ["unown.io:9210"]
 cert_path = "./config/cert/client_cert.pem"
 private_key_path = "./config/cert/client_key.pem"
 ca_path = "./config/cert/ca_cert.pem"

@@ -1,12 +1,12 @@
 [package]
 name = "eldegoss"
-version = "0.5.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
 description = "eldegoss net"
 readme = "../README.md"
 repository = "https://github.com/prime-rs/eldegoss"
 license = "Apache-2.0"
-authors = ["JLer <jlerxky@live.com>"]
 categories = ["network-programming"]
 keywords = ["p2p", "gossip", "swim", "quic", "foca"]
 

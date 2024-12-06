@@ -1,0 +1,13 @@
+[Unit]
+Description=eldegoss_router
+
+[Service]
+User=root
+Restart=always
+TimeoutSec=0
+RestartSec=5
+ExecStart=/usr/bin/eldegoss_router -c /root/eldegoss_router/router.toml
+ExecReload=/usr/bin/eldegoss_router -c /root/eldegoss_router/router.toml
+
+[Install]
+WantedBy=multi-user.target

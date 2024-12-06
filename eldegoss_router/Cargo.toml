@@ -1,0 +1,52 @@
+[package]
+name = "eldegoss_router"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[package.metadata.deb]
+maintainer = "JLer <jlerxky@live.com>"
+section = "utility"
+maintainer-scripts = "../"
+systemd-units = { unit-name = "eldegoss_router", enable = true, start = true, restart-after-upgrade = true }
+assets = [
+    [
+        "../target/x86_64-unknown-linux-musl/release/eldegoss_router",
+        "/usr/bin/eldegoss_router",
+        "755",
+    ],
+    [
+        "../config/router.toml",
+        "/root/eldegoss_router/",
+        "644",
+    ],
+    [
+        "../config/cert/server_cert.pem",
+        "/root/eldegoss_router/cert/",
+        "644",
+    ],
+    [
+        "../config/cert/server_key.pem",
+        "/root/eldegoss_router/cert/",
+        "644",
+    ],
+    [
+        "../config/cert/ca_cert.pem",
+        "/root/eldegoss_router/cert/",
+        "644",
+    ],
+]
+
+[dependencies]
+eldegoss = { path = "../eldegoss" }
+
+clap = { workspace = true }
+color-eyre = { workspace = true }
+common_x = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+openssl.workspace = true
+
+[lints]
+workspace = true
